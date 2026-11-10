@@ -24,6 +24,35 @@ def magic_ok(kind: str, head: bytes) -> bool:
     return True
 
 
+def served_type(kind: str, head: bytes) -> tuple[str, bool]:
+    """Server-derived Content-Type for a stored file and whether it must be sent as an attachment.
+
+    The client-supplied content type is never trusted: it would let an admin upload "text/html" and have it served
+    from the admin origin. Only images/videos recognised by their magic bytes are rendered inline; everything else
+    (documents, unknown signatures) is an opaque download.
+    """
+    if kind == "photo":
+        if head.startswith(b"\xff\xd8\xff"):
+            return "image/jpeg", False
+        if head.startswith(b"\x89PNG"):
+            return "image/png", False
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return "image/webp", False
+    elif kind in ("video", "animation"):
+        if head[:3] == b"GIF":
+            return "image/gif", False
+        if head[4:8] == b"ftyp":
+            return "video/mp4", False
+        if head[:4] == b"\x1aE\xdf\xa3":
+            return "video/webm", False
+    return "application/octet-stream", True
+
+
+def safe_filename(name: str) -> str:
+    cleaned = "".join(ch for ch in name if ch.isalnum() or ch in "._- ").strip(" .")
+    return (cleaned or "file")[:80]
+
+
 async def init(session: Any, body: dict[str, Any]) -> dict[str, Any]:
     kind = str(body.get("kind") or "")
     if kind not in MEDIA_KINDS:

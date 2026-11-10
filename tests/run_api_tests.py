@@ -347,6 +347,19 @@ async def main_async() -> None:
     h.ok([m["id"] for m in d["media"]] == [mid_], "media listing")
     resp = await client.get(f"{PREFIX_A}/media/{mid_}", headers=ADMIN)
     h.ok((await resp.read()) == jpeg and resp.status == 200, "media download")
+    h.ok(resp.headers.get("Content-Type", "").startswith("image/jpeg"), "download type is derived from the file, not the client")
+    h.ok(resp.headers.get("X-Content-Type-Options") == "nosniff" and "sandbox" in resp.headers.get("Content-Security-Policy", ""), "download has nosniff and CSP sandbox")
+    # A document uploaded with a hostile client content type is served as an opaque attachment.
+    html_doc = b"<html><script>alert(1)</script></html>"
+    d = await call("POST", f"{PREFIX_A}/media", headers=ADMIN, body={"kind": "document", "size": len(html_doc), "filename": "../evil.html", "content_type": "text/html"})
+    doc_id = d["id"]
+    await client.put(f"{PREFIX_A}/media/{doc_id}/chunk", headers={**ADMIN, "X-Offset": "0"}, data=html_doc)
+    await call("POST", f"{PREFIX_A}/media/{doc_id}/finish", headers=ADMIN, body={})
+    resp = await client.get(f"{PREFIX_A}/media/{doc_id}", headers=ADMIN)
+    h.ok(resp.headers.get("Content-Type", "").startswith("application/octet-stream"), "document is never served as html")
+    cd = resp.headers.get("Content-Disposition", "")
+    h.ok(cd.startswith("attachment") and "/" not in cd and ".." not in cd.split("filename=")[-1].strip('"').replace("evil.html", ""), "document is an attachment with a sanitised name")
+    await call("DELETE", f"{PREFIX_A}/media/{doc_id}", headers=ADMIN)
     d = await call("POST", f"{PREFIX_A}/media", headers=ADMIN, body={"kind": "photo", "size": 10})
     await client.put(f"{PREFIX_A}/media/{d['id']}/chunk", headers={**ADMIN, "X-Offset": "0"}, data=b"notanimage")
     await call("POST", f"{PREFIX_A}/media/{d['id']}/finish", headers=ADMIN, body={}, expect=400)

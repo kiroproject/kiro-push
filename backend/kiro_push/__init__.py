@@ -513,10 +513,20 @@ async def admin_media_get(request: web.Request) -> web.Response:
     if not media_id.isalnum():
         raise PushError("not_found", 404)
     async with get_session_factory(request)() as session:
-        row = (await session.execute(text("select content_type, body from ext_kiro_push_media where id = :i and complete"), {"i": media_id})).first()
+        row = (await session.execute(text("select kind, filename, body from ext_kiro_push_media where id = :i and complete"), {"i": media_id})).first()
     if row is None:
         raise PushError("not_found", 404)
-    return web.Response(body=bytes(row[1]), content_type=row[0] or "application/octet-stream", headers={"Cache-Control": "private, max-age=3600"})
+    body = bytes(row[2])
+    content_type, as_attachment = media.served_type(str(row[0]), body[:16])
+    headers = {
+        "Cache-Control": "private, max-age=3600",
+        "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox; default-src 'none'",
+        "Cross-Origin-Resource-Policy": "same-origin",
+    }
+    if as_attachment:
+        headers["Content-Disposition"] = f'attachment; filename="{media.safe_filename(str(row[1] or ""))}"'
+    return web.Response(body=body, content_type=content_type, headers=headers)
 
 
 async def admin_media_delete(request: web.Request) -> web.Response:
