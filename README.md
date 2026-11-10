@@ -1,7 +1,7 @@
 # KIRO Push — поздравления и подарки для Remnawave Minishop
 
 > [!TIP]
-> **Плагин работает в [kirovpn](https://app.kiroproject.online/?campaign=gh_push&utm_source=github&utm_medium=readme&utm_campaign=kiro-push).** Посмотрите поздравления вживую в Telegram-боте [@marmeladki_app_bot](https://t.me/marmeladki_app_bot?start=gh_push).
+> **Плагин работает в [kirovpn](https://app.kiroproject.online/?campaign=gh_push&utm_source=github&utm_medium=readme&utm_campaign=kiro-push).** Посмотрите поздравления вживую в Telegram-боте [@kirovpnapp](https://t.me/kirovpnapp?start=gh_push).
 
 [![KIRO Push](docs/cover.webp)](docs/cover.webp)
 
