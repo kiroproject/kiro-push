@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>kiro-push admin preview</title>
+<style>
+  /* approximation of the Minishop admin theme variables (the real ones could not be verified here) */
+  :root{--bg:#161a22;--text:#eef1f6;--muted:#8b93a3;--accent:#7c5cff;--accent-contrast:#fff;--border:#2b3140;--radius:12px;--panel:#1c212b;--panel-2:#232a36}
+  :root[data-theme=light]{--bg:#f4f6fa;--text:#1b2230;--muted:#667085;--accent:#5b4fe0;--border:#d9dee8;--panel:#ffffff;--panel-2:#f1f3f8}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:16px}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"></div>
+<script type="module">
+  // Standalone review of the admin bundle against a stubbed API. Serve the plugin folder over http (python -m http.server)
+  // and open /preview/index.html?screen=overview|events|editor|editor2|editor3|birthdates|journal|log|emoji|run&theme=light
+  import { mockFetch } from "./mock.js";
+  const q = new URLSearchParams(location.search);
+  if (q.get("theme") === "light") document.documentElement.dataset.theme = "light";
+  window.fetch = mockFetch;
+  const admin = await import("../frontend/admin/index.js?" + Date.now());
+  admin.mountView("main", document.getElementById("app"), {});
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const click = async (sel, ms = 300) => { const el = document.querySelector(sel); if (el) el.click(); await wait(ms); };
+  const screen = q.get("screen") || "overview";
+  await wait(500);
+  if (screen === "events") await click('[data-tab="events"]', 700);
+  if (screen.startsWith("editor")) {
+    await click('[data-tab="events"]', 600);
+    await click(screen === "editor3" ? '[data-ev="4"] [data-edit]' : '[data-ev="1"] [data-edit]', 1400);
+    if (screen === "editor2") document.querySelector('[data-sec="gift"]').scrollIntoView();
+    if (screen === "editor3") document.querySelector('[data-sec="msg"]').scrollIntoView();
+  }
+  if (screen === "birthdates") await click('[data-tab="birthdates"]', 900);
+  if (screen === "journal") await click('[data-tab="journal"]', 900);
+  if (screen === "log") { await click('[data-tab="journal"]', 600); await click('[data-jt="log"]', 700); }
+  if (screen === "emoji") { await click('[data-tab="events"]', 600); await click('[data-ev="1"] [data-edit]', 1000); await click("[data-emoji]", 300); await click('[data-t="custom"]', 800); }
+  if (screen === "run") { await click('[data-tab="events"]', 600); await click('[data-ev="5"] [data-run]', 900); }
+  document.body.dataset.ready = "1";
+  if (q.get("debug")) {
+    const w = document.documentElement.clientWidth;
+    const bad = [...document.querySelectorAll(".kpu *")].filter((e) => e.getBoundingClientRect().right > w + 1).slice(0, 12).map((e) => `${e.tagName}.${e.className}|${e.dataset ? Object.keys(e.dataset).join() : ""}|${Math.round(e.getBoundingClientRect().right)}`);
+    const pre = document.createElement("pre"); pre.id = "dbg"; pre.textContent = `W=${w} scroll=${document.documentElement.scrollWidth} ` + bad.join(" ## "); document.body.prepend(pre);
+  }
+</script>
+</body>
+</html>

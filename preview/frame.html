@@ -1,0 +1,13 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>mobile frame</title>
+<style>body{margin:0;background:#000}iframe{border:0;display:block;margin:0}</style>
+<script>
+  // Shows index.html inside a 390 px wide frame (headless Edge cannot go below ~480 px): ?w=390&h=3600&screen=editor
+  const q = new URLSearchParams(location.search);
+  const f = document.createElement("iframe");
+  f.width = q.get("w") || 390; f.height = q.get("h") || 3000;
+  q.delete("w"); q.delete("h");
+  f.src = "index.html?" + q;
+  document.body.appendChild(f);
+</script>
