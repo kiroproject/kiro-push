@@ -71,7 +71,12 @@ def clean_audience(raw: Any) -> dict[str, Any]:
         key = str(item or "").strip()
         if key and len(key) <= 64 and key not in keys:
             keys.append(key)
-    return {"segments": segments, "language": language, "tariff_keys": keys[:100]}
+    skip_blocked = raw.get("skip_blocked", True)
+    if skip_blocked is None:
+        skip_blocked = True  # a missing key (old events) behaves as "skip"
+    if not isinstance(skip_blocked, bool):
+        raise PushError("invalid_audience")
+    return {"segments": segments, "language": language, "tariff_keys": keys[:100], "skip_blocked": skip_blocked}
 
 
 def valid_month_day(month: int, day: int) -> bool:

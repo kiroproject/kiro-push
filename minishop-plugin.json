@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "artifact": "dist/kiro-push-0.1.0.zip",
-  "sha256": "b00013ffad27a389e5f4f35f0499c89c3290b471a6d7ef4a4ff5a4c6a548ace5",
-  "version": "0.1.0"
+  "artifact": "dist/kiro-push-0.1.1.zip",
+  "sha256": "d1868af8aa5e8c8b61c7a9ce15adb2d6ae80ee4bf81dd5a461dc9709e728dc5a",
+  "version": "0.1.1"
 }

@@ -38,6 +38,40 @@ cand as (
 """
 
 
+# Core keeps its own, proactively maintained Telegram notification status (see Minishop "Служебные события Telegram").
+# Static fragments (no user input is ever formatted into SQL). NULL / unknown / enabled never exclude anybody.
+CORE_BLOCKED_CAND = (
+    "not exists (select 1 from users cb where cb.user_id = c.user_id and cb.telegram_notifications_status = 'blocked')"
+)
+CORE_BLOCKED_USER = "u.telegram_notifications_status = 'blocked'"
+
+_core_blocked_column: bool | None = None
+
+
+def reset_core_schema_cache() -> None:
+    """Forget the detected Core schema (tests swap fake Core tables between runs)."""
+    global _core_blocked_column
+    _core_blocked_column = None
+
+
+async def core_blocked_supported(factory: Any) -> bool:
+    """True when Core's ``users.telegram_notifications_status`` exists. Detected once per process; errors mean 'no'."""
+    global _core_blocked_column
+    if _core_blocked_column is None:
+        try:
+            async with factory() as session:
+                found = await session.scalar(
+                    text(
+                        "select 1 from information_schema.columns where table_name = 'users' "
+                        "and column_name = 'telegram_notifications_status' and table_schema = any(current_schemas(false))"
+                    )
+                )
+        except Exception:  # noqa: BLE001 - never block planning because of schema detection
+            return False
+        _core_blocked_column = bool(found)
+    return _core_blocked_column
+
+
 def label_of(row: Any) -> str:
     username = str(row["username"] or "").strip()
     return f"@{username}" if username else f"id {row['user_id']}"

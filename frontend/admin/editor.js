@@ -82,7 +82,7 @@ export function mountEditor(host, ctx, { draft, onClose }) {
     const d = st.d;
     const aud = d.audience.segments.length === 3 ? "все пользователи" : d.audience.segments.map((s) => SEGMENT_RU[s]).join(" + ") || "никто";
     let gift = giftSummary(toPayloadSafe().gift, ctx.currency);
-    sum.innerHTML = `<div class="kpu-card"><h3>Итог</h3><dl class="kpu-kv"><dt>Когда</dt><dd>${esc(scheduleSummary({ kind: d.kind, send_time: d.send_time, params: toPayloadSafe().params }))}</dd><dt>Кому</dt><dd>${esc(aud)}${d.audience.language !== "any" ? `, язык ${esc(d.audience.language)}` : ""}</dd><dt>Подарок</dt><dd>${esc(gift)}</dd></dl></div>`;
+    sum.innerHTML = `<div class="kpu-card"><h3>Итог</h3><dl class="kpu-kv"><dt>Когда</dt><dd>${esc(scheduleSummary({ kind: d.kind, send_time: d.send_time, params: toPayloadSafe().params }))}</dd><dt>Кому</dt><dd>${esc(aud)}${d.audience.language !== "any" ? `, язык ${esc(d.audience.language)}` : ""}${d.audience.skip_blocked === false ? ", включая заблокировавших бота" : ""}</dd><dt>Подарок</dt><dd>${esc(gift)}</dd></dl></div>`;
     for (const b of $$(host, "[data-needs-saved]")) b.title = st.d.id ? "" : "Сначала сохраните событие";
   }
 
@@ -173,13 +173,17 @@ export function mountEditor(host, ctx, { draft, onClose }) {
   function paintAudience() {
     const a = st.d.audience;
     sec("aud").innerHTML = `<h3>2. Кому</h3>
-      <div class="kpu-muted" style="margin-bottom:6px">Категории объединяются. Забанённые и заблокировавшие бота пользователи не получают сообщения никогда.</div>
+      <div class="kpu-muted" style="margin-bottom:6px">Категории объединяются. Забанённые в Minishop пользователи не получают сообщения никогда.</div>
       <div class="kpu-chips">${caps.segments.map((s) => `<button type="button" class="kpu-chip ${a.segments.includes(s.id) ? "on" : ""}" data-seg="${s.id}" aria-pressed="${a.segments.includes(s.id)}">${esc(SEGMENT_RU[s.id] || s.label)}</button>`).join("")}</div>
       <div class="kpu-form" style="margin-top:10px">
         <label class="f">Язык пользователя<select data-alang><option value="any">Любой</option><option value="ru">Русский</option><option value="en">Английский</option></select></label>
         <label class="f">Тарифы (ключи через запятую)<input type="text" data-tariffs value="${esc(a.tariff_keys)}" placeholder="Пусто = любые"><span class="kpu-muted">Ограничивает только платных пользователей</span></label>
-      </div><div data-err="audience"></div>`;
+      </div>
+      <label class="chk" style="margin-top:10px"><input type="checkbox" data-skipblocked ${a.skip_blocked !== false ? "checked" : ""}> Не отправлять тем, кто заблокировал бота</label>
+      <div class="kpu-muted">Статус берётся из Minishop (Telegram сообщает о блокировке сам) и из наших неудачных отправок. Если выключить, сообщение будет отправлено и таким пользователям, а при ошибке они снова попадут в список заблокировавших.</div>
+      <div data-err="audience"></div>`;
     $(sec("aud"), "[data-alang]").value = a.language;
+    $(sec("aud"), "[data-skipblocked]").onchange = (e) => { a.skip_blocked = e.target.checked; changed(); };
     $$(sec("aud"), "[data-seg]").forEach((b) => b.addEventListener("click", () => {
       const i = a.segments.indexOf(b.dataset.seg);
       if (i >= 0) a.segments.splice(i, 1); else a.segments.push(b.dataset.seg);

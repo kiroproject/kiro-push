@@ -580,12 +580,136 @@ async def manual_tests(db: h.Db) -> None:
     h.ok(d["promo"] == {"issued": 2, "activated": 1}, f"promo activations attributable to push codes ({d['promo']})")
 
 
+async def blocked_tests(db: h.Db) -> None:
+    print("skip_blocked (Core status + own blocked table)")
+    f = db.factory
+    NOW = utc(2026, 11, 10, 7, 0)
+    clock = h.Clock(NOW)
+    ALL = {"segments": ["none", "trial", "paid"], "language": "any", "tariff_keys": []}
+
+    async def world(audience: dict | None, kind: str = "birthday") -> int:
+        await db.reset()
+        # 1 plain (NULL status), 2 enabled, 3 unknown, 4 Core blocked, 5 own-table blocked, 6 banned + Core blocked,
+        # 7 own-table blocked long ago (outside blocked_retry_days), 8 Core blocked + own table
+        for uid, notif in ((1, None), (2, "enabled"), (3, "unknown"), (4, "blocked"), (5, None), (6, "blocked"), (7, None), (8, "blocked")):
+            await db.add_user(uid, username=f"u{uid}", notif=notif, banned=uid == 6)
+            await set_bd(db, uid, 10, 11, 1990)
+        await db.exec("insert into ext_kiro_push_blocked (user_id, reason) values (5, 'bot was blocked'), (8, 'bot was blocked')")
+        await db.exec("insert into ext_kiro_push_blocked (user_id, reason, created_at) values (7, 'old', now() - interval '200 days')")
+        return await add_event(db, kind, audience=audience)
+
+    # planning
+    for label, aud, expected in (
+        ("skip_blocked true", {**ALL, "skip_blocked": True}, {1, 2, 3, 7}),
+        ("key missing (old event) behaves as true", ALL, {1, 2, 3, 7}),
+        ("skip_blocked false", {**ALL, "skip_blocked": False}, {1, 2, 3, 4, 5, 7, 8}),
+    ):
+        await world(aud)
+        await sch.plan_events(f, CFG, now=NOW)
+        got = set(await delivered(db))
+        h.ok(got == expected, f"planning, {label}: {sorted(expected)} (got {sorted(got)})")
+    created = (await sch.plan_events(f, CFG, now=NOW + timedelta(minutes=30)))["created"]
+    h.ok(created == 0 and await db.count("ext_kiro_push_deliveries") == 7, "re-planning with skip_blocked off creates nothing new (idempotent)")
+
+    # one_time / fixed_date go through the same statement
+    for kind, params in (("one_time", {"date": "2026-11-10"}), ("fixed_date", {"date": "11-10"})):
+        await world({**ALL, "skip_blocked": True}, kind)
+        await db.exec("update ext_kiro_push_events set params = cast(:p as jsonb)", p=json.dumps(params))
+        await sch.plan_events(f, CFG, now=NOW)
+        h.ok(set(await delivered(db)) == {1, 2, 3, 7}, f"{kind}: Core-blocked and recently own-blocked users skipped")
+
+    # registration anniversary
+    await world({**ALL, "skip_blocked": True}, "registration_anniversary")
+    await db.exec("update users set registration_date = '2023-11-10 08:00+00'")
+    await db.exec("update ext_kiro_push_events set params = cast(:p as jsonb)", p=json.dumps({"offset_days": 0, "min_years": 1}))
+    await sch.plan_events(f, CFG, now=NOW)
+    h.ok(set(await delivered(db)) == {1, 2, 3, 7}, "anniversary: blocked users skipped when skip_blocked")
+    await db.exec("truncate table ext_kiro_push_deliveries, ext_kiro_push_plans")
+    await db.exec("update ext_kiro_push_events set audience = cast(:a as jsonb)", a=json.dumps({**ALL, "skip_blocked": False}))
+    await sch.plan_events(f, CFG, now=NOW)
+    h.ok(set(await delivered(db)) == {1, 2, 3, 4, 5, 7, 8}, "anniversary: nobody skipped when skip_blocked is off (banned still out)")
+
+    # delivery re-check
+    await world({**ALL, "skip_blocked": False})
+    await sch.plan_events(f, CFG, now=NOW)
+    await db.exec("update ext_kiro_push_events set audience = cast(:a as jsonb)", a=json.dumps({**ALL, "skip_blocked": True}))
+    gw = h.FakeGateway()
+    await sch.process_batch(f, gw, CFG, clock=clock, sleep=h.no_sleep)
+    rows = {int(r["user_id"]): (r["status"], r["reason"]) for r in await db.q("select user_id, status, reason from ext_kiro_push_deliveries")}
+    h.ok(all(rows[u] == ("skipped", "user_blocked") for u in (4, 5, 8)), f"delivery re-check: Core/own blocked finished as skipped/user_blocked ({rows})")
+    h.ok(all(rows[u][0] == "sent" for u in (1, 2, 3, 7)) and sorted(c for c, _ in gw.sent) == [100001, 100002, 100003, 100007], "others (NULL/enabled/unknown/old own row) are sent")
+
+    eid = await world({**ALL, "skip_blocked": False})
+    await sch.plan_events(f, CFG, now=NOW)
+    gw = h.FakeGateway(sends={100004: [tg.SendResult("blocked", "Forbidden: bot was blocked by the user")]})
+    await sch.process_batch(f, gw, CFG, clock=clock, sleep=h.no_sleep)
+    rows = {int(r["user_id"]): r["status"] for r in await db.q("select user_id, status from ext_kiro_push_deliveries")}
+    h.ok(rows[4] == "blocked" and rows[5] == "sent" and rows[8] == "sent" and rows[1] == "sent", f"skip_blocked off: blocked users are tried anyway ({rows})")
+    h.ok(await db.count("ext_kiro_push_blocked", "user_id = 4") == 1, "a failed send still records the user as blocked")
+
+    # a banned user is never contacted, whatever the option says
+    h.ok(6 not in rows, "banned user is excluded from planning even with skip_blocked off")
+    await db.exec("insert into ext_kiro_push_deliveries (event_id, user_id, period_key, base_year, status, next_try_at) values (:e, 6, 'x', 2026, 'pending', :t)", e=eid, t=NOW)
+    gw = h.FakeGateway()
+    await sch.process_batch(f, gw, CFG, clock=clock, sleep=h.no_sleep)
+    h.ok((await db.one("select reason from ext_kiro_push_deliveries where user_id = 6"))["reason"] == "user_banned" and not gw.sent, "delivery step also refuses banned users")
+
+    # manual run: dry run + queue
+    await db.reset()
+    for uid, notif in ((1, None), (2, "enabled"), (3, "blocked"), (4, "unknown"), (5, None)):
+        await db.add_user(uid, username=f"u{uid}", notif=notif)
+    await db.exec("insert into ext_kiro_push_blocked (user_id) values (5)")
+    mid = await add_event(db, "manual", audience={**ALL, "skip_blocked": True})
+    row = dict(await db.one("select * from ext_kiro_push_events where id = :i", i=mid))
+    dry = await sch.run_manual(f, row, CFG, {"dry_run": True})
+    h.ok(dry["matched"] == 3 and dry["sample"] == ["@u1", "@u2", "@u4"], f"manual dry run excludes Core and own blocked ({dry})")
+    dry = await sch.run_manual(f, row, CFG, {"dry_run": True, "audience": {**ALL, "skip_blocked": False}})
+    h.ok(dry["matched"] == 5, "manual dry run with override skip_blocked=false counts everybody")
+    dry = await sch.run_manual(f, row, CFG, {"dry_run": True, "audience": ALL})
+    h.ok(dry["matched"] == 3, "override without the key behaves as true")
+    real = await sch.run_manual(f, row, CFG, {"batch_id": "b1"}, now=NOW)
+    h.ok(real["queued"] == 3 and real["matched"] == 3, "manual run queues only the non-blocked users")
+    real = await sch.run_manual(f, row, CFG, {"batch_id": "b1"}, now=NOW)
+    h.ok(real["queued"] == 0 and await db.count("ext_kiro_push_deliveries") == 3, "same batch is idempotent")
+
+    # Core without the status column: behaves as before (own table only)
+    await db.reset()
+    await db.set_core_status(False)
+    for uid in (1, 2, 3):
+        await db.add_user(uid, username=f"u{uid}")
+        await set_bd(db, uid, 10, 11, 1990)
+    await db.exec("insert into ext_kiro_push_blocked (user_id) values (3)")
+    await add_event(db, audience={**ALL, "skip_blocked": True})
+    await sch.plan_events(f, CFG, now=NOW)
+    h.ok(set(await delivered(db)) == {1, 2}, "missing Core column: planning works, own blocked table still honoured")
+    gw = h.FakeGateway()
+    await sch.process_batch(f, gw, CFG, clock=clock, sleep=h.no_sleep)
+    h.ok(len(gw.sent) == 2, "missing Core column: delivery works")
+    dry = await sch.run_manual(f, {**row, "audience": json.dumps({**ALL, "skip_blocked": True})}, CFG, {"dry_run": True})
+    h.ok(dry["matched"] == 2, "missing Core column: manual dry run works")
+    await db.set_core_status(True)
+
+    print("skip_blocked validation")
+    base = {"name": "Д", "kind": "birthday", "send_time": "10:00", "templates": {"ru": {"text": "x"}}, "enabled": True}
+    h.ok(ev.clean_event(base, wheel_installed=False)["audience"]["skip_blocked"] is True, "default audience skip_blocked = true")
+    h.ok(ev.clean_event({**base, "audience": {"skip_blocked": False}}, wheel_installed=False)["audience"]["skip_blocked"] is False, "false is kept")
+    h.ok(ev.clean_audience({"segments": ["paid"]})["skip_blocked"] is True, "old stored audience without the key -> true")
+    for bad in ("false", 0, 1, "yes", [], {}):
+        try:
+            ev.clean_event({**base, "audience": {"skip_blocked": bad}}, wheel_installed=False)
+        except PushError as exc:
+            h.ok(exc.code == "invalid_audience", f"skip_blocked={bad!r} rejected as invalid_audience")
+        else:
+            raise AssertionError(f"accepted skip_blocked={bad!r}")
+
+
 async def main() -> None:
     pure_tests()
     db = await h.make_db()
     await planning_tests(db)
     await delivery_tests(db)
     await manual_tests(db)
+    await blocked_tests(db)
     h.finish()
 
 

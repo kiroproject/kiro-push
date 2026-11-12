@@ -37,7 +37,7 @@ from .users import SEGMENT_LABELS, SEGMENTS, resolve_user
 
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 USER = f"/api/plugins/{PLUGIN_ID}"
 ADMIN = f"/api/admin/{PLUGIN_ID}"
 RUNTIME: dict[str, Any] = {}
@@ -203,6 +203,7 @@ def _capabilities(wheel: bool) -> dict[str, Any]:
         "feb29_rules": [{"id": "feb28", "label": "28 февраля"}, {"id": "mar1", "label": "1 марта"}],
         "segments": [{"id": s, "label": SEGMENT_LABELS[s]} for s in SEGMENTS],
         "languages": ["ru", "en"],
+        "default_audience": eventdefs.clean_audience({}),  # includes skip_blocked: true
         "media_kinds": list(templates.MEDIA_KINDS),
         "button_kinds": [
             {"id": "url", "label": "Ссылка"}, {"id": "web_app", "label": "Mini App (https)"},

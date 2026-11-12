@@ -138,7 +138,7 @@ export const CONFIG_FIELDS = [
     ["scan_new_users", "Проверять новых пользователей", "Дата рождения запрашивается у Telegram после регистрации.", "bool"],
     ["rescan_missing_days", "Повторная проверка скрытых дат, дней", "Через сколько дней снова спрашивать Telegram у тех, у кого дата скрыта.", "int", 1, 365],
     ["rescan_max_attempts", "Максимум повторных проверок", "Сколько раз всего спрашивать Telegram у одного пользователя.", "int", 1, 20],
-    ["blocked_retry_days", "Пользователь заблокировал бота, дней до повтора", "Столько дней такой пользователь не попадает в планирование.", "int", 1, 3650],
+    ["blocked_retry_days", "Заблокировал бота (по неудачной отправке), дней до повтора", "Если отправка не удалась из-за блокировки бота, пользователь пропускается столько дней, потом мы пробуем снова. Дополнительно всегда учитывается статус блокировки из самого Minishop. Работает, пока у события включено «Не отправлять заблокировавшим».", "int", 1, 3650],
   ] },
   { group: "Ввод даты пользователем", items: [
     ["user_entry_enabled", "Разрешить вводить дату в кабинете", "Если Telegram дату не отдаёт, пользователь может указать её сам один раз.", "bool"],
@@ -373,6 +373,7 @@ export function audienceSummary(aud) {
   const parts = [all ? "все пользователи" : segs.map((s) => SEGMENT_RU[s] || s).join(" + ")];
   if (a.language && a.language !== "any") parts.push(a.language === "ru" ? "язык: русский" : "язык: английский");
   if ((a.tariff_keys || []).length) parts.push(`тарифы: ${a.tariff_keys.join(", ")}`);
+  if (a.skip_blocked === false) parts.push("включая заблокировавших бота");
   return parts.join(", ");
 }
 
@@ -605,7 +606,7 @@ export function blankDraft(kind = "manual") {
     kind,
     enabled: false,
     params: { offset_days: 0, min_years: 1, date: "" },
-    audience: { segments: ["none", "trial", "paid"], language: "any", tariff_keys: "" },
+    audience: { segments: ["none", "trial", "paid"], language: "any", tariff_keys: "", skip_blocked: true },
     send_time: "10:00",
     feb29: "feb28",
     gift: { kind: "none", gb: "1", days: "7", amount: "100", percent: "20", valid_days: "14", applies_to: "subscription", spins: "1", ignore_cap: false },
@@ -635,7 +636,7 @@ export const PRESETS = [
       ...blankDraft("registration_anniversary"), name: "Годовщина с нами",
       params: { offset_days: 0, min_years: 1, date: "" },
       gift: { ...blankDraft().gift, kind: "days", days: "7" },
-      audience: { segments: ["trial", "paid"], language: "any", tariff_keys: "" },
+      audience: { segments: ["trial", "paid"], language: "any", tariff_keys: "", skip_blocked: true },
       templates: {
         ru: { ...emptyTemplate(), text: "🎉 <b>{name}, нам уже {years} лет вместе!</b>\n\nСпасибо, что остаётесь с нами.[[ Дарим вам {gift}.]]", text_no_gift: "🎉 <b>{name}, мы вместе уже {years} лет!</b>\n\nСпасибо, что остаётесь с нами." },
         en: { ...emptyTemplate(), text: "🎉 <b>{name}, {years} years together!</b>\n\nThank you for staying with us.[[ Our gift: {gift}.]]", text_no_gift: "🎉 <b>{name}, {years} years together!</b>\n\nThank you for staying with us." },
@@ -726,6 +727,7 @@ export function toPayload(d, { forPreview = false } = {}) {
       segments: d.audience.segments.slice(),
       language: d.audience.language,
       tariff_keys: Array.isArray(d.audience.tariff_keys) ? d.audience.tariff_keys : String(d.audience.tariff_keys || "").split(/[,\s]+/).filter(Boolean),
+      skip_blocked: d.audience.skip_blocked !== false,
     },
     send_time: d.send_time,
     feb29: d.feb29,
@@ -753,7 +755,7 @@ export function fromEvent(ev) {
     name: ev.name,
     enabled: !!ev.enabled,
     params: { offset_days: ev.params?.offset_days ?? 0, min_years: ev.params?.min_years ?? 1, date: ev.params?.date || "" },
-    audience: { segments: (ev.audience?.segments || base.audience.segments).slice(), language: ev.audience?.language || "any", tariff_keys: (ev.audience?.tariff_keys || []).join(", ") },
+    audience: { segments: (ev.audience?.segments || base.audience.segments).slice(), language: ev.audience?.language || "any", tariff_keys: (ev.audience?.tariff_keys || []).join(", "), skip_blocked: ev.audience?.skip_blocked !== false },
     send_time: ev.send_time || "10:00",
     feb29: ev.feb29 || "feb28",
     gift,

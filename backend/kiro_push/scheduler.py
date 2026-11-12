@@ -26,7 +26,7 @@ from .eventdefs import DueSlot, clean_audience, clean_batch_id, due_slots, month
 from .storage import jload
 from .telegram import Gateway, visible_length
 from .templates import pick_template, render_message
-from .users import SEGMENT_CTE, label_of
+from .users import CORE_BLOCKED_CAND, SEGMENT_CTE, core_blocked_supported, label_of
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,12 @@ Clock = Callable[[], datetime]
 Sleep = Callable[[float], Awaitable[None]]
 
 
+def clean_audience_flag(event: dict[str, Any]) -> bool:
+    """``audience.skip_blocked`` of a stored event; a missing or malformed key means 'skip' (the safe default)."""
+    value = (jload(event["audience"]) or {}).get("skip_blocked", True)
+    return value if isinstance(value, bool) else True
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -47,7 +53,15 @@ def _now() -> datetime:
 # ------------------------------------------------------------------ audience / SQL
 
 
-def audience_conditions(aud: dict[str, Any], params: dict[str, Any], default_language: str) -> list[str]:
+def audience_conditions(
+    aud: dict[str, Any], params: dict[str, Any], default_language: str, *, core_blocked: bool = False
+) -> list[str]:
+    """WHERE parts over the ``cand`` CTE. Banned users are already out of ``cand``.
+
+    ``skip_blocked`` (default on) drops users Core marked ``telegram_notifications_status = 'blocked'`` (only when
+    ``core_blocked``, i.e. the Core column exists) and users in our own blocked table within ``blocked_retry_days``
+    (the caller must then put ``bdays`` into ``params``).
+    """
     where = ["c.segment = any(cast(:segs as text[]))"]
     params["segs"] = list(aud["segments"])
     if aud["language"] in ("ru", "en"):
@@ -57,14 +71,19 @@ def audience_conditions(aud: dict[str, Any], params: dict[str, Any], default_lan
     if aud["tariff_keys"]:
         where.append("(c.segment <> 'paid' or c.tariff_key = any(cast(:keys as text[])))")
         params["keys"] = list(aud["tariff_keys"])
-    where.append(
-        "not exists (select 1 from ext_kiro_push_blocked k where k.user_id = c.user_id "
-        "and k.created_at > now() - make_interval(days => :bdays))"
-    )
+    if aud.get("skip_blocked", True):
+        where.append(
+            "not exists (select 1 from ext_kiro_push_blocked k where k.user_id = c.user_id "
+            "and k.created_at > now() - make_interval(days => :bdays))"
+        )
+        if core_blocked:
+            where.append(CORE_BLOCKED_CAND)
     return where
 
 
-def _plan_statement(event: dict[str, Any], slot: DueSlot, config: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+def _plan_statement(
+    event: dict[str, Any], slot: DueSlot, config: dict[str, Any], *, core_blocked: bool = False
+) -> tuple[str, dict[str, Any]]:
     kind = event["kind"]
     aud = clean_audience(jload(event["audience"]))
     params: dict[str, Any] = {
@@ -73,7 +92,7 @@ def _plan_statement(event: dict[str, Any], slot: DueSlot, config: dict[str, Any]
         "tz": config["timezone"],
     }
     joins = ""
-    where = audience_conditions(aud, params, config["default_language"])
+    where = audience_conditions(aud, params, config["default_language"], core_blocked=core_blocked)
     ev_params = jload(event["params"]) or {}
     if kind == "birthday":
         joins = "join ext_kiro_push_birthdates b on b.user_id = c.user_id and b.day is not null"
@@ -91,7 +110,9 @@ def _plan_statement(event: dict[str, Any], slot: DueSlot, config: dict[str, Any]
     return sql, params
 
 
-async def _plan_anniversary(session: Any, event: dict[str, Any], slot: DueSlot, config: dict[str, Any]) -> int:
+async def _plan_anniversary(
+    session: Any, event: dict[str, Any], slot: DueSlot, config: dict[str, Any], *, core_blocked: bool = False
+) -> int:
     """Registration anniversaries: the local calendar date comes from Python's zoneinfo, not from the database.
 
     SQL narrows by UTC month/day (one day either side), Python decides exactly in the configured timezone
@@ -101,7 +122,7 @@ async def _plan_anniversary(session: Any, event: dict[str, Any], slot: DueSlot, 
     min_years = int((jload(event["params"]) or {}).get("min_years", 1))
     aud = clean_audience(jload(event["audience"]))
     params: dict[str, Any] = {"bdays": int(config["blocked_retry_days"])}
-    where = audience_conditions(aud, params, config["default_language"])
+    where = audience_conditions(aud, params, config["default_language"], core_blocked=core_blocked)
     wanted = set(month_day_keys(slot.base_date, event["feb29"]))
     coarse: set[int] = set()
     for shift in (-1, 0, 1):
@@ -145,6 +166,7 @@ async def plan_events(factory: Any, config: dict[str, Any], *, now: datetime | N
     now = now or _now()
     tz = ZoneInfo(config["timezone"])
     created = planned = 0
+    core_blocked = await core_blocked_supported(factory)
     async with factory() as session:
         events = (
             await session.execute(
@@ -162,9 +184,9 @@ async def plan_events(factory: Any, config: dict[str, Any], *, now: datetime | N
                 if recent is not None and now - recent < timedelta(minutes=REPLAN_MINUTES):
                     continue
                 if event["kind"] == "registration_anniversary":
-                    inserted = await _plan_anniversary(session, event, slot, config)
+                    inserted = await _plan_anniversary(session, event, slot, config, core_blocked=core_blocked)
                 else:
-                    sql, params = _plan_statement(event, slot, config)
+                    sql, params = _plan_statement(event, slot, config, core_blocked=core_blocked)
                     result = await session.execute(text(sql), params)
                     inserted = int(result.rowcount or 0)
                 await session.execute(
@@ -189,7 +211,9 @@ async def run_manual(
         raise PushError("run_not_supported")
     aud = clean_audience(body["audience"]) if isinstance(body.get("audience"), dict) else clean_audience(jload(event["audience"]))
     params: dict[str, Any] = {"bdays": int(config["blocked_retry_days"])}
-    where = " and ".join(audience_conditions(aud, params, config["default_language"]))
+    where = " and ".join(
+        audience_conditions(aud, params, config["default_language"], core_blocked=await core_blocked_supported(factory))
+    )
     async with factory() as session:
         rows = (
             await session.execute(
@@ -398,7 +422,25 @@ async def process_delivery(
                 {"u": d["user_id"]},
             )
         ).mappings().first()
-        blocked = await session.scalar(text("select 1 from ext_kiro_push_blocked where user_id = :u"), {"u": d["user_id"]})
+        skip_blocked = clean_audience_flag(event)
+        blocked = False
+        if skip_blocked:
+            blocked = bool(
+                await session.scalar(
+                    text(
+                        "select 1 from ext_kiro_push_blocked where user_id = :u "
+                        "and created_at > now() - make_interval(days => :bdays)"
+                    ),
+                    {"u": d["user_id"], "bdays": int(config["blocked_retry_days"])},
+                )
+            )
+            if not blocked and await core_blocked_supported(factory):
+                blocked = bool(
+                    await session.scalar(
+                        text("select 1 from users where user_id = :u and telegram_notifications_status = 'blocked'"),
+                        {"u": d["user_id"]},
+                    )
+                )
     if user is None:
         return await _finish(factory, d, "skipped", "user_missing"), 0
     if user["is_banned"]:

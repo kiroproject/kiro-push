@@ -1,6 +1,6 @@
 # HTTP API и настройки KIRO Push
 
-Контракт плагина `kiro-push` 0.1.0. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
+Контракт плагина `kiro-push` 0.1.1. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
 
 ## Настройки (`PUT /config`)
 
@@ -48,6 +48,11 @@
     `fixed_date` `{date: "MM-DD"}`; `one_time` `{date: "YYYY-MM-DD"}`; `manual` `{}`.
   - `audience`: `{segments: ["none","trial","paid"], language: "any"|"ru"|"en", tariff_keys: []}` (допустим также
     `{segment: "all"|"paid"|"trial"|"none"}`). `tariff_keys` ограничивают только платных.
+    `skip_blocked` (boolean, по умолчанию `true`; не-boolean → 400 `invalid_audience`): при `true` исключаются пользователи со статусом
+    Minishop `users.telegram_notifications_status = 'blocked'` и пользователи из `ext_kiro_push_blocked` моложе `blocked_retry_days`
+    дней; при `false` не исключается никто из них (забанённые исключены всегда). Ключ возвращается нормализованным в `GET /events`,
+    `GET /events/{id}` и в `capabilities.default_audience` (для старых событий без ключа он равен `true`). Поле также принимает
+    `audience` в `POST /events/{id}/run`.
   - `gift`: `{kind: "none"}`, `{kind: "traffic", gb}`, `{kind: "days", days}`, `{kind: "balance", amount_minor}`,
     `{kind: "promo_discount", percent, valid_days (14), applies_to: "subscription"|"all"}`,
     `{kind: "wheel_spins", spins, ignore_cap}`.

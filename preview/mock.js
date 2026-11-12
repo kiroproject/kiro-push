@@ -24,7 +24,7 @@ caps.gift_kinds = [{ id: "none", label: "Без подарка", available: true
 const ago = (min) => new Date(Date.now() - min * 60000).toISOString();
 const tpl = (text, text_no_gift = "", extra = {}) => ({ text, text_no_gift, media: [], buttons: [], disable_notification: false, protect_content: false, disable_preview: true, ...extra });
 const BDAY_RU = "🎂 <b>С днём рождения, {name}!</b>\n\nМы рады, что вы с нами.[[ Вам исполнилось {age}.]][[ Наш подарок: {gift}.]][[\nПромокод: <code>{promo_code}</code>]]";
-const aud = (segments = ["none", "trial", "paid"], language = "any") => ({ segments, language, tariff_keys: [] });
+const aud = (segments = ["none", "trial", "paid"], language = "any") => ({ segments, language, tariff_keys: [], skip_blocked: true });
 const zero = { pending: 0, sending: 0, sent: 0, skipped: 0, failed: 0, blocked: 0 };
 
 const state = {
@@ -85,7 +85,7 @@ function upcoming() {
 }
 function overview() {
   return {
-    version: "0.1.0", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
+    version: "0.1.1", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
     birthdates: { eligible_users: 18400, collected: 1480, by_source: { telegram: 61, user: 1380, admin: 39 }, hidden: 9210, blocked: 612, errors: 3, cleared: 5, unknown: 7090, coverage: 0.0804, with_year: 1120 },
     upcoming: upcoming(), deliveries: { total: totals(), events: {}, promo: { issued: 1240, activated: 318 } }, backfill: state.backfill,
     events_total: state.events.length, capabilities: caps,

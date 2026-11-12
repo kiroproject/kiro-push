@@ -171,7 +171,8 @@ async def raises(coro, code: str, label: str, error_type: type | None = None) ->
 
 DDL = [
     """CREATE TABLE users (user_id BIGINT PRIMARY KEY, telegram_id BIGINT, username TEXT, first_name TEXT, language_code TEXT,
-        minishop_id TEXT, is_banned BOOLEAN, registration_date TIMESTAMPTZ DEFAULT now())""",
+        minishop_id TEXT, is_banned BOOLEAN, registration_date TIMESTAMPTZ DEFAULT now(),
+        telegram_notifications_status TEXT, telegram_notifications_blocked_at TIMESTAMPTZ)""",
     """CREATE TABLE subscriptions (subscription_id SERIAL PRIMARY KEY, user_id BIGINT, panel_user_uuid TEXT,
         traffic_limit_bytes BIGINT, provider TEXT, status_from_panel TEXT, tariff_key TEXT,
         end_date TIMESTAMPTZ NOT NULL, is_active BOOLEAN DEFAULT TRUE)""",
@@ -191,6 +192,7 @@ WHEEL_DDL = [
 class Db:
     def __init__(self, server: Any, engine: Any, factory: Callable[[], AsyncSession]) -> None:
         self.server, self.engine, self.factory = server, engine, factory
+        self.core_status_column = True
 
     async def q(self, sql: str, **params: Any) -> list[Any]:
         async with self.factory() as s:
@@ -211,13 +213,28 @@ class Db:
         return int((await self.q(f"select count(*) as n from {table} where {where}"))[0]["n"])
 
     async def add_user(self, uid: int, tg: int | None = None, username: str | None = None, *, name: str | None = "Имя",
-                       lang: str | None = "ru", banned: bool | None = False, reg: datetime | None = None) -> None:
+                       lang: str | None = "ru", banned: bool | None = False, reg: datetime | None = None,
+                       notif: str | None = None) -> None:
+        cols = "user_id, telegram_id, username, first_name, language_code, is_banned, registration_date"
+        vals = ":u, :t, :n, :f, :l, :b, :r"
+        if notif is not None and self.core_status_column:
+            cols += ", telegram_notifications_status"
+            vals += ", :ns"
         await self.exec(
-            "insert into users (user_id, telegram_id, username, first_name, language_code, is_banned, registration_date) "
-            "values (:u, :t, :n, :f, :l, :b, :r)",
+            f"insert into users ({cols}) values ({vals})",
             u=uid, t=tg if tg is not None else uid + 100000, n=username, f=name, l=lang, b=banned,
-            r=reg or datetime(2023, 5, 17, 12, 0, tzinfo=UTC),
+            r=reg or datetime(2023, 5, 17, 12, 0, tzinfo=UTC), **({"ns": notif} if "ns" in vals else {}),
         )
+
+    async def set_core_status(self, enabled: bool) -> None:
+        """Simulate a Core with / without ``users.telegram_notifications_status`` (the plugin caches the detection)."""
+        have = (await self.count("information_schema.columns", "table_name = 'users' and column_name = 'telegram_notifications_status'")) > 0
+        if enabled and not have:
+            await self.exec("alter table users add column telegram_notifications_status text, add column telegram_notifications_blocked_at timestamptz")
+        if not enabled and have:
+            await self.exec("alter table users drop column telegram_notifications_status, drop column telegram_notifications_blocked_at")
+        self.core_status_column = enabled
+        importlib.import_module("kiro_push.users").reset_core_schema_cache()
 
     async def add_sub(self, uid: int, *, days: int = 30, provider: str = "payment", tariff: str | None = "start",
                       status: str | None = "ACTIVE", active: bool = True) -> None:
@@ -228,6 +245,7 @@ class Db:
         )
 
     async def reset(self) -> None:
+        await self.set_core_status(True)
         for table in (
             "users", "subscriptions", "promo_codes", "promo_code_activations", "ext_kiro_push_birthdates",
             "ext_kiro_push_birthdate_audit", "ext_kiro_push_user_attempts", "ext_kiro_push_backfill", "ext_kiro_push_events",

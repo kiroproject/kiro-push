@@ -30,6 +30,8 @@ eq(L.scheduleSummary({ kind: "one_time", send_time: "09:00", params: { date: "20
 eq(L.scheduleSummary({ kind: "manual", params: {} }).startsWith("только по кнопке"), true, "schedule manual");
 eq(L.audienceSummary({ segments: ["none", "trial", "paid"], language: "any", tariff_keys: [] }), "все пользователи", "audience all");
 eq(L.audienceSummary({ segments: ["paid"], language: "ru", tariff_keys: ["m1"] }), "Платная, язык: русский, тарифы: m1", "audience paid");
+eq(L.audienceSummary({ segments: ["none", "trial", "paid"], language: "any", tariff_keys: [], skip_blocked: true }), "все пользователи", "audience: skip_blocked on adds nothing");
+eq(L.audienceSummary({ segments: ["paid"], language: "any", tariff_keys: [], skip_blocked: false }), "Платная, включая заблокировавших бота", "audience: skip_blocked off is mentioned");
 eq(L.giftSummary({ kind: "balance", amount_minor: 15000 }, "RUB"), "+150 ₽ на баланс", "gift balance");
 eq(L.giftSummary({ kind: "days", days: 1 }), "+1 день", "gift days 1");
 eq(L.giftSummary({ kind: "promo_discount", percent: 20, valid_days: 14 }), "промокод −20% на 14 дн.", "gift promo");
@@ -75,6 +77,13 @@ eq(L.toPayload({ ...draft, gift: { ...draft.gift, kind: "balance", amount: "150,
 const back = L.fromEvent({ id: 7, name: "x", kind: "birthday", enabled: true, params: { offset_days: -1 }, audience: { segments: ["paid"], language: "ru", tariff_keys: ["a", "b"] }, send_time: "11:00", feb29: "mar1", gift: { kind: "balance", amount_minor: 9950 }, gift_fallback: "skip", templates: { ru: { text: "t" } } });
 eq([back.gift.amount, back.audience.tariff_keys, back.templates.ru.text, back.templates.en.text], ["99.5", "a, b", "t", ""], "fromEvent");
 eq(L.toPayload(back).audience.tariff_keys, ["a", "b"], "tariff keys round trip");
+eq(payload.audience.skip_blocked, true, "preset payload: skip_blocked defaults to true");
+eq(L.blankDraft("manual").audience.skip_blocked, true, "blank draft: skip_blocked on");
+eq(L.fromEvent({ id: 8, name: "old", kind: "manual", audience: { segments: ["paid"], language: "any", tariff_keys: [] }, templates: {} }).audience.skip_blocked, true, "fromEvent: missing key = on");
+const noSkip = L.fromEvent({ id: 9, name: "x", kind: "manual", audience: { segments: ["paid"], language: "any", tariff_keys: [], skip_blocked: false }, templates: {} });
+eq([noSkip.audience.skip_blocked, L.toPayload(noSkip).audience.skip_blocked], [false, false], "skip_blocked=false round trip");
+eq(L.toPayload({ ...noSkip, audience: { ...noSkip.audience, skip_blocked: true } }).audience.skip_blocked, true, "skip_blocked=true to payload");
+eq(L.PRESETS.every((p) => L.toPayload(p.build()).audience.skip_blocked === true), true, "all presets send skip_blocked=true");
 eq(L.toPayload(draft, { forPreview: true }).enabled, false, "preview payload disabled");
 eq(L.draftProblems({ ...L.blankDraft("fixed_date"), name: "x" }).map((p) => p[0]), ["params"], "problems: fixed date missing");
 eq(L.splitIssues(["[ru] a", "[en] b", "c"]), { ru: ["a"], en: ["b"], general: ["c"] }, "split issues");

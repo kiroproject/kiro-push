@@ -47,7 +47,7 @@ ADMIN = {"X-Admin": "1", "X-Admin-Tg": "999001"}
 def plugin_wiring_tests() -> None:
     print("plugin wiring")
     p = pkg.plugin
-    h.ok(p.name == "kiro-push" and p.version == "0.1.0", "name / version")
+    h.ok(p.name == "kiro-push" and p.version == "0.1.1", "name / version")
     h.ok([m.id for m in p.migrations()] == ["kiro-push.0001_initial"], "migration chain kiro-push.0001_*")
     ext = p.extensions(SimpleNamespace())
     job = ext.jobs[0]
@@ -166,12 +166,14 @@ async def main_async() -> None:
     await call("PUT", f"{PREFIX_A}/config", headers=ADMIN, body={"timezone": "Europe/Moscow"})
     d = await call("GET", f"{PREFIX_A}/overview", headers=ADMIN)
     caps = d["capabilities"]
-    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.0", "overview: flags")
+    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.1", "overview: flags")
     h.ok({k["id"] for k in caps["event_kinds"]} == {"birthday", "registration_anniversary", "fixed_date", "one_time", "manual"}, "capabilities: event kinds")
     h.ok([g["available"] for g in caps["gift_kinds"] if g["id"] == "wheel_spins"] == [False], "capabilities: wheel_spins unavailable without the wheel")
     h.ok(len(caps["placeholders"]) == 11 and caps["limits"]["text"] == 4096 and caps["limits"]["caption"] == 1024 and caps["emoji_library"]["library"].endswith("/library"), "capabilities: placeholders, limits, emoji endpoints")
     h.ok({"birthdates", "upcoming", "deliveries", "backfill", "config"} <= set(d), "overview: stats blocks")
     h.ok(isinstance(d.get("currency"), str) and len(d["currency"]) >= 1, f"overview: currency for the gift editor ({d.get('currency')})")
+
+    h.ok(caps["default_audience"] == {"segments": ["none", "trial", "paid"], "language": "any", "tariff_keys": [], "skip_blocked": True}, "capabilities: default audience includes skip_blocked")
 
     print("admin API: events")
     tpl_ru = {"text": "С днём рождения, {name}![[ Вам исполнилось {age}.]][[ Подарок: {gift}.]]", "text_no_gift": "С днём рождения, {name}!",
@@ -188,6 +190,16 @@ async def main_async() -> None:
     h.ok(len(d["events"]) == 1 and d["events"][0]["id"] == eid and d["events"][0]["gift"] == {"kind": "days", "days": 7}, "list events")
     d = await call("GET", f"{PREFIX_A}/events/{eid}", headers=ADMIN)
     h.ok(d["event"]["templates"]["ru"]["text_no_gift"] == "С днём рождения, {name}!" and d["event"]["audience"]["segments"] == ["none", "trial", "paid"], "get event (templates round-trip, default audience)")
+    h.ok(d["event"]["audience"]["skip_blocked"] is True, "get event: skip_blocked defaults to true")
+    d = await call("POST", f"{PREFIX_A}/events", headers=ADMIN, body={**event_body, "audience": {"skip_blocked": "no"}}, expect=400)
+    h.ok(d["error"] == "invalid_audience", "non-boolean skip_blocked rejected on create")
+    await call("PUT", f"{PREFIX_A}/events/{eid}", headers=ADMIN, body={**event_body, "audience": {"skip_blocked": 1}}, expect=400)
+    d = await call("PUT", f"{PREFIX_A}/events/{eid}", headers=ADMIN, body={**event_body, "audience": {"skip_blocked": False}})
+    d = await call("GET", f"{PREFIX_A}/events/{eid}", headers=ADMIN)
+    h.ok(d["event"]["audience"]["skip_blocked"] is False, "skip_blocked=false saved and echoed by GET")
+    d = await call("GET", f"{PREFIX_A}/events", headers=ADMIN)
+    h.ok(d["events"][0]["audience"]["skip_blocked"] is False, "list events echoes skip_blocked")
+    await call("PUT", f"{PREFIX_A}/events/{eid}", headers=ADMIN, body=event_body)
     await call("GET", f"{PREFIX_A}/events/999", headers=ADMIN, expect=404)
     d = await call("PUT", f"{PREFIX_A}/events/{eid}", headers=ADMIN, body={**event_body, "name": "Birthday 2", "send_time": "11:30", "feb29": "mar1"})
     d = await call("GET", f"{PREFIX_A}/events/{eid}", headers=ADMIN)
@@ -225,6 +237,13 @@ async def main_async() -> None:
     mid = d["id"]
     d = await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"dry_run": True})
     h.ok(d["dry_run"] and d["matched"] == 5 and len(d["sample"]) == 5, "manual run dry-run: matched + sample")
+    await db.exec("update users set telegram_notifications_status = 'blocked' where user_id = 2")
+    d = await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"dry_run": True})
+    h.ok(d["matched"] == 4, "manual run dry-run: Core-blocked user excluded by default")
+    d = await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"dry_run": True, "audience": {"skip_blocked": False}})
+    h.ok(d["matched"] == 5, "manual run dry-run: skip_blocked=false counts the blocked user")
+    await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"dry_run": True, "audience": {"skip_blocked": "x"}}, expect=400)
+    await db.exec("update users set telegram_notifications_status = null where user_id = 2")
     d = await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"batch_id": "b1"})
     h.ok(d["queued"] == 5, "manual run queued")
     d = await call("POST", f"{PREFIX_A}/events/{mid}/run", headers=ADMIN, body={"batch_id": "b1"})
@@ -327,7 +346,7 @@ async def main_async() -> None:
     h.ok(d["rows"] and d["max_rows"] == 5000 and "counts" in d, "journal list")
     d = await call("GET", f"{PREFIX_A}/logs?level=warn", headers=ADMIN)
     report = await call("GET", f"{PREFIX_A}/logs/download", headers=ADMIN)
-    h.ok("KIRO Push journal" in report and "kiro-push 0.1.0" in report and "masked" in report, "journal download (header + masked)")
+    h.ok("KIRO Push journal" in report and "kiro-push 0.1.1" in report and "masked" in report, "journal download (header + masked)")
     d = await call("POST", f"{PREFIX_A}/logs/clear", headers=ADMIN, body={})
     h.ok(d["removed"] > 0, "journal cleared")
 
