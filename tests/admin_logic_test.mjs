@@ -90,6 +90,61 @@ eq(L.splitIssues(["[ru] a", "[en] b", "c"]), { ru: ["a"], en: ["b"], general: ["
 eq(L.newBatchId().length, 16, "batch id");
 eq(L.PRESETS.map((p) => L.toPayload(p.build()).kind), ["birthday", "registration_anniversary", "fixed_date", "one_time", "manual"], "presets cover kinds");
 
+// draft autosave + recovery helpers (storage is a stub; a blocked storage must never throw)
+const memStore = () => { const m = new Map(); return { getItem: (k) => (m.has(k) ? m.get(k) : null), setItem: (k, v) => { m.set(k, String(v)); }, removeItem: (k) => { m.delete(k); }, _m: m }; };
+const blocked = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); }, removeItem() { throw new Error("blocked"); } };
+const T0 = 1_800_000_000_000;
+const edited = { ...L.PRESETS[0].build(), name: "Анонс", id: 5 };
+const store = memStore();
+eq(L.saveDraft(store, { eventId: 5, name: edited.name, draft: edited }, T0), "saved", "draft: saved");
+const rec = L.loadDraft(store, T0 + 1000);
+eq([rec.eventId, rec.name, rec.savedAt, rec.draft.kind, rec.draft.gift.kind, rec.draft.templates.ru.text === edited.templates.ru.text], [5, "Анонс", T0, "birthday", "promo_discount", true], "draft: round trip");
+eq(JSON.parse(store.getItem(L.DRAFT_KEY)).v, 1, "draft: versioned record");
+eq(L.loadDraft(store, T0 + L.DRAFT_TTL_MS + 1), null, "draft: expires after 7 days");
+eq(store.getItem(L.DRAFT_KEY), null, "draft: expired record removed");
+L.saveDraft(store, { eventId: null, name: "N", draft: edited }, T0);
+eq(L.loadDraft(store, T0 + L.DRAFT_TTL_MS - 5)?.eventId, null, "draft: new event has eventId null");
+eq(L.loadDraft(store, T0 - 7_200_000), null, "draft: savedAt in the far future is rejected");
+store.setItem(L.DRAFT_KEY, "{not json");
+eq(L.loadDraft(store, T0), null, "draft: corrupt JSON ignored");
+eq(store.getItem(L.DRAFT_KEY), null, "draft: corrupt record removed");
+store.setItem(L.DRAFT_KEY, JSON.stringify({ v: 2, scope: "event-editor", savedAt: T0, draft: edited }));
+eq(L.loadDraft(store, T0), null, "draft: unknown version ignored");
+store.setItem(L.DRAFT_KEY, JSON.stringify({ v: 1, scope: "event-editor", savedAt: T0, draft: { kind: "nope", templates: {} } }));
+eq(L.loadDraft(store, T0), null, "draft: unknown kind ignored");
+const huge = { ...edited, templates: { ...edited.templates, ru: { ...edited.templates.ru, text: "я".repeat(L.DRAFT_MAX_BYTES) } } };
+eq(L.saveDraft(store, { eventId: 1, name: "big", draft: huge }, T0), "too_large", "draft: >300 KB is not stored");
+eq(L.serializeDraft({ draft: huge }), null, "draft: serialize size guard");
+const partial = L.normalizeDraft({ kind: "manual", name: "p", templates: { ru: { text: "x" } }, audience: { language: "ru" } });
+eq([partial.audience.segments, partial.audience.language, partial.templates.en.media, partial.templates.ru.disable_preview, partial.gift.kind], [["none", "trial", "paid"], "ru", [], true, "none"], "draft: normalize fills defaults");
+eq(L.saveDraft(blocked, { draft: edited }, T0), "error", "draft: blocked storage -> error, no throw");
+eq(L.loadDraft(blocked, T0), null, "draft: blocked storage -> null");
+eq(L.loadDraft(null, T0), null, "draft: no storage -> null");
+L.clearDraft(blocked); L.clearDraft(null);
+eq(L.loadDraft(memStore(), T0), null, "draft: empty storage");
+L.saveDraft(store, { draft: edited }, T0); L.clearDraft(store);
+eq(store.getItem(L.DRAFT_KEY), null, "draft: cleared");
+// tab + editor-open flag
+const ss = memStore();
+const tabs = ["overview", "events", "birthdates", "journal"];
+eq(L.loadTab(ss, tabs, "overview"), "overview", "tab: default");
+L.saveTab(ss, "events");
+eq(L.loadTab(ss, tabs, "overview"), "events", "tab: remembered");
+ss.setItem(L.TAB_KEY, "evil<script>");
+eq(L.loadTab(ss, tabs, "journal"), "journal", "tab: unknown value -> fallback");
+eq(L.loadTab(blocked, tabs, "journal"), "journal", "tab: blocked storage -> fallback");
+eq(L.saveTab(blocked, "events"), false, "tab: blocked storage save is a no-op");
+eq([L.getFlag(ss, L.EDITOR_OPEN_KEY), L.setFlag(ss, L.EDITOR_OPEN_KEY, true), L.getFlag(ss, L.EDITOR_OPEN_KEY)], [false, true, true], "flag: set");
+L.setFlag(ss, L.EDITOR_OPEN_KEY, false);
+eq(L.getFlag(ss, L.EDITOR_OPEN_KEY), false, "flag: cleared");
+eq(L.getFlag(blocked, L.EDITOR_OPEN_KEY), false, "flag: blocked storage");
+// client diagnostics payload
+eq(L.cleanClientDetail({ nav_type: "reload", ua: "u".repeat(300), message: "m ".repeat(200), in_telegram: true, editor_open: false, tab: "events", ms_since_mount: 1234.7, visibility: "visible", last_pagehide: "not" }),
+  { nav_type: "reload", ua: "u".repeat(160), message: "m ".repeat(200).trim().slice(0, 200), in_telegram: true, editor_open: false, tab: "events", ms_since_mount: 1235, visibility: "visible", last_pagehide: "not" }, "client detail: clipped allowlist");
+eq(L.cleanClientDetail({ draft: "secret", name: "x", message: { a: 1 }, in_telegram: "yes", ms_since_mount: NaN }), {}, "client detail: forbidden keys / wrong types dropped");
+eq(L.CLIENT_EVENTS, ["page_reload_detected", "editor_restored", "js_error", "unhandled_rejection"], "client events");
+eq(Object.keys(L.LOG_EVENTS).filter((k) => k.startsWith("client_")).sort(), L.CLIENT_EVENTS.map((e) => `client_${e}`).sort(), "journal titles for every client event");
+
 // reasons
 eq(L.reasonText("send_error:Bad Request"), "Ошибка отправки: Bad Request", "reason prefix");
 eq(L.reasonText("user_banned"), "Пользователь забанен", "reason known");

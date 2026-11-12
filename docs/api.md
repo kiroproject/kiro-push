@@ -1,6 +1,6 @@
 # HTTP API и настройки KIRO Push
 
-Контракт плагина `kiro-push` 0.1.1. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
+Контракт плагина `kiro-push` 0.1.2. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
 
 ## Настройки (`PUT /config`)
 
@@ -113,6 +113,15 @@
   (`mask=0` отключает).
 - `GET /stats` → `{birthdates, upcoming, deliveries}`.
 - `GET /logs?level=&limit=`, `GET /logs/download?mask=1&limit=` (text/plain), `POST /logs/clear`.
+- `POST /client-log` `{event, detail}` — диагностика браузера (страница админки перезагрузилась во время правки события, ошибка
+  JavaScript). Только администратор, нужен CSRF-токен, ответ `{ok: true}`. `event` — одно из `page_reload_detected`,
+  `editor_restored`, `js_error`, `unhandled_rejection`, иначе `400 invalid_client_event`. `detail` — необязательный объект
+  размером не более 1 КБ в JSON, значения только строки, числа или `true`/`false`; разрешены ключи `nav_type`, `visibility`,
+  `in_telegram`, `ua` (до 160 символов), `editor_open`, `tab`, `message` (до 200), `ms_since_mount`, `last_pagehide`; любой
+  другой ключ, неверный тип или превышение размера дают `400 invalid_client_detail`. Не более 20 запросов в минуту на
+  администратора (`429 rate_limited`). Запись попадает в журнал плагина с уровнем `warn` и событием `client_<event>`
+  (например `client_page_reload_detected`); текст событий, содержимое черновиков и персональные данные не принимаются и не
+  хранятся.
 
 Библиотека custom emoji: плагин свой список не держит. Редактор использует API Core (та же сессия администратора):
 `GET /api/admin/telegram-emoji/library`, `/catalog`, `/previews`, `/media/{emoji_id}`. В HTML-тексте эмодзи записывается как

@@ -226,10 +226,14 @@ export function confirmBox(htmlText, okLabel = "Продолжить", { danger 
   });
 }
 
-export function toast(text, kind = "ok") {
+/** Browser storages; null when blocked (private mode, site data disabled). Callers must cope with null. */
+export const localStore = () => { try { return window.localStorage || null; } catch { return null; } };
+export const sessionStore = () => { try { return window.sessionStorage || null; } catch { return null; } };
+
+export function toast(text, kind = "ok", ms) {
   const t = h(`<div class="kpu-banner kpu ${kind}" role="status" style="position:fixed;right:16px;bottom:16px;z-index:2147483001;max-width:min(380px,calc(100vw - 32px));background:var(--panel,#1b1f2a)">${esc(text)}</div>`);
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), kind === "bad" ? 7000 : 4000);
+  setTimeout(() => t.remove(), ms || (kind === "bad" ? 7000 : 4000));
 }
 
 export function fail(err) {

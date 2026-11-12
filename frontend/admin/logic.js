@@ -240,6 +240,9 @@ export const ERRORS = {
   already_running: "Сканирование уже идёт",
   nothing_to_resume: "Нечего возобновлять: начните новое сканирование",
   invalid_rate: "Скорость сканирования: от 1 до 28 запросов в секунду",
+  // client diagnostics
+  invalid_client_event: "Неизвестное клиентское событие",
+  invalid_client_detail: "Некорректные данные клиентского события",
 };
 
 export function errorText(code, data) {
@@ -314,6 +317,10 @@ export const LOG_EVENTS = {
   delivery_crashed: "Сбой при обработке доставки",
   gift_not_given: "Подарок не выдан",
   internal_error: "Внутренняя ошибка",
+  client_page_reload_detected: "Страница перезагрузилась во время редактирования",
+  client_editor_restored: "Черновик восстановлен после перезагрузки страницы",
+  client_js_error: "Ошибка JavaScript на странице",
+  client_unhandled_rejection: "Необработанная ошибка в браузере",
 };
 
 // ----------------------------------------------------------------------------------------------- summaries
@@ -815,4 +822,117 @@ export function sparkBars(days) {
     const dt = new Date(`${d.date}T00:00:00`);
     return { date: d.date, count: d.count, height: d.count ? Math.max(8, Math.round((d.count / max) * 100)) : 3, label: `${dt.getDate()} ${MONTHS_RU[dt.getMonth()]}: ${d.count}` };
   });
+}
+
+// ----------------------------------------------------------------------------------------------- draft autosave + tab memory
+// Storage objects are passed in (localStorage / sessionStorage or a test stub); every access is wrapped, storage may be blocked.
+export const DRAFT_KEY = "kiro-push:draft:v1";
+export const TAB_KEY = "kiro-push:tab";
+export const EDITOR_OPEN_KEY = "kiro-push:editor-open";
+export const PAGEHIDE_KEY = "kiro-push:pagehide";
+export const MOUNTED_AT_KEY = "kiro-push:mounted-at";
+export const ERRORS_SENT_KEY = "kiro-push:errors-sent";
+export const DRAFT_MAX_BYTES = 300 * 1024;
+export const DRAFT_TTL_MS = 7 * 24 * 3600 * 1000;
+const DRAFT_SCOPE = "event-editor";
+
+export function storageGet(storage, key) {
+  try { return storage ? storage.getItem(key) : null; } catch { return null; }
+}
+export function storageSet(storage, key, value) {
+  try { if (!storage) return false; storage.setItem(key, String(value)); return true; } catch { return false; }
+}
+export function storageRemove(storage, key) {
+  try { storage?.removeItem(key); } catch { /* storage blocked */ }
+}
+
+/** Draft record -> JSON string, or null when it is over the size limit. Media are referenced by id only (templates hold ids, never bytes). */
+export function serializeDraft({ eventId = null, name = "", draft }, now = Date.now()) {
+  let raw;
+  try {
+    raw = JSON.stringify({ v: 1, scope: DRAFT_SCOPE, eventId: eventId ?? null, name: String(name || "").slice(0, 120), draft, savedAt: now });
+  } catch { return null; }
+  return raw.length > DRAFT_MAX_BYTES ? null : raw;
+}
+
+/** Draft from the stored API shape, filled with defaults; null if it is not a usable editor draft. */
+export function normalizeDraft(raw) {
+  if (!raw || typeof raw !== "object" || typeof raw.kind !== "string" || !KIND_RU[raw.kind]) return null;
+  if (!raw.templates || typeof raw.templates !== "object") return null;
+  const base = blankDraft(raw.kind);
+  const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
+  const tpl = (v) => {
+    const t = { ...emptyTemplate(), ...obj(v) };
+    t.media = Array.isArray(t.media) ? t.media : [];
+    t.buttons = Array.isArray(t.buttons) ? t.buttons : [];
+    return t;
+  };
+  const d = {
+    ...base,
+    ...raw,
+    id: Number.isInteger(raw.id) ? raw.id : null,
+    name: String(raw.name || ""),
+    enabled: !!raw.enabled,
+    params: { ...base.params, ...obj(raw.params) },
+    audience: { ...base.audience, ...obj(raw.audience) },
+    gift: { ...base.gift, ...obj(raw.gift) },
+    templates: { ru: tpl(raw.templates.ru), en: tpl(raw.templates.en) },
+  };
+  if (!Array.isArray(d.audience.segments)) d.audience.segments = base.audience.segments.slice();
+  return d;
+}
+
+/** Stored JSON -> {eventId, name, draft, savedAt} or null (corrupt, wrong version, expired, too large). */
+export function parseDraft(raw, now = Date.now()) {
+  if (typeof raw !== "string" || !raw || raw.length > DRAFT_MAX_BYTES) return null;
+  let rec;
+  try { rec = JSON.parse(raw); } catch { return null; }
+  if (!rec || rec.v !== 1 || rec.scope !== DRAFT_SCOPE || !Number.isFinite(rec.savedAt)) return null;
+  if (now - rec.savedAt > DRAFT_TTL_MS || rec.savedAt - now > 3600 * 1000) return null;
+  const draft = normalizeDraft(rec.draft);
+  if (!draft) return null;
+  const eventId = Number.isInteger(rec.eventId) && rec.eventId > 0 ? rec.eventId : null;
+  return { eventId, name: String(rec.name || draft.name || ""), draft, savedAt: rec.savedAt };
+}
+
+/** Returns "saved" | "too_large" | "error". */
+export function saveDraft(storage, rec, now = Date.now()) {
+  const raw = serializeDraft(rec, now);
+  if (raw === null) return "too_large";
+  return storageSet(storage, DRAFT_KEY, raw) ? "saved" : "error";
+}
+
+/** Reads the draft; an expired or corrupt record is removed. */
+export function loadDraft(storage, now = Date.now()) {
+  const raw = storageGet(storage, DRAFT_KEY);
+  if (raw === null) return null;
+  const rec = parseDraft(raw, now);
+  if (!rec) storageRemove(storage, DRAFT_KEY);
+  return rec;
+}
+export const clearDraft = (storage) => storageRemove(storage, DRAFT_KEY);
+
+export function loadTab(storage, allowed, fallback = "overview") {
+  const t = storageGet(storage, TAB_KEY);
+  return t && allowed.includes(t) ? t : fallback;
+}
+export const saveTab = (storage, tab) => storageSet(storage, TAB_KEY, tab);
+
+export const getFlag = (storage, key) => storageGet(storage, key) === "1";
+export const setFlag = (storage, key, on) => (on ? storageSet(storage, key, "1") : (storageRemove(storage, key), true));
+
+// ----------------------------------------------------------------------------------------------- client diagnostics payload
+// Mirrors the backend allowlist (kiro_push.clean_client_detail): a few scalar keys, never draft content or event text.
+export const CLIENT_EVENTS = ["page_reload_detected", "editor_restored", "js_error", "unhandled_rejection"];
+const CLIENT_STR = { nav_type: 24, visibility: 16, ua: 160, tab: 24, message: 200, last_pagehide: 16 };
+const CLIENT_BOOL = ["in_telegram", "editor_open"];
+
+export function cleanClientDetail(raw) {
+  const out = {};
+  for (const [k, v] of Object.entries(raw || {})) {
+    if (k in CLIENT_STR && typeof v === "string") out[k] = v.replace(/\s+/g, " ").trim().slice(0, CLIENT_STR[k]);
+    else if (CLIENT_BOOL.includes(k) && typeof v === "boolean") out[k] = v;
+    else if (k === "ms_since_mount" && typeof v === "number" && Number.isFinite(v)) out[k] = Math.max(0, Math.min(Math.round(v), 1e9));
+  }
+  return out;
 }

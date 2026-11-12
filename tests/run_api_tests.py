@@ -47,7 +47,7 @@ ADMIN = {"X-Admin": "1", "X-Admin-Tg": "999001"}
 def plugin_wiring_tests() -> None:
     print("plugin wiring")
     p = pkg.plugin
-    h.ok(p.name == "kiro-push" and p.version == "0.1.1", "name / version")
+    h.ok(p.name == "kiro-push" and p.version == "0.1.2", "name / version")
     h.ok([m.id for m in p.migrations()] == ["kiro-push.0001_initial"], "migration chain kiro-push.0001_*")
     ext = p.extensions(SimpleNamespace())
     job = ext.jobs[0]
@@ -166,7 +166,7 @@ async def main_async() -> None:
     await call("PUT", f"{PREFIX_A}/config", headers=ADMIN, body={"timezone": "Europe/Moscow"})
     d = await call("GET", f"{PREFIX_A}/overview", headers=ADMIN)
     caps = d["capabilities"]
-    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.1", "overview: flags")
+    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.2", "overview: flags")
     h.ok({k["id"] for k in caps["event_kinds"]} == {"birthday", "registration_anniversary", "fixed_date", "one_time", "manual"}, "capabilities: event kinds")
     h.ok([g["available"] for g in caps["gift_kinds"] if g["id"] == "wheel_spins"] == [False], "capabilities: wheel_spins unavailable without the wheel")
     h.ok(len(caps["placeholders"]) == 11 and caps["limits"]["text"] == 4096 and caps["limits"]["caption"] == 1024 and caps["emoji_library"]["library"].endswith("/library"), "capabilities: placeholders, limits, emoji endpoints")
@@ -346,9 +346,47 @@ async def main_async() -> None:
     h.ok(d["rows"] and d["max_rows"] == 5000 and "counts" in d, "journal list")
     d = await call("GET", f"{PREFIX_A}/logs?level=warn", headers=ADMIN)
     report = await call("GET", f"{PREFIX_A}/logs/download", headers=ADMIN)
-    h.ok("KIRO Push journal" in report and "kiro-push 0.1.1" in report and "masked" in report, "journal download (header + masked)")
+    h.ok("KIRO Push journal" in report and "kiro-push 0.1.2" in report and "masked" in report, "journal download (header + masked)")
     d = await call("POST", f"{PREFIX_A}/logs/clear", headers=ADMIN, body={})
     h.ok(d["removed"] > 0, "journal cleared")
+
+    print("client diagnostics (POST /client-log)")
+    CL = f"{PREFIX_A}/client-log"
+    await call("POST", f"{PREFIX_A}/logs/clear", headers=ADMIN, body={})
+    sample = {"nav_type": "reload", "visibility": "visible", "in_telegram": False, "ua": "Mozilla/5.0 " + "x" * 190, "editor_open": True, "tab": "events", "message": "boom " * 50, "ms_since_mount": 41234}
+    d = await call("POST", CL, headers=ADMIN, body={"event": "page_reload_detected", "detail": sample})
+    h.ok(d == {"ok": True}, "client-log: ok envelope")
+    rows = await call("GET", f"{PREFIX_A}/logs?level=warn", headers=ADMIN)
+    row = next((r for r in rows["rows"] if r["event"] == "client_page_reload_detected"), None)
+    h.ok(row is not None and row["level"] == "warn", "client-log: journal entry client_page_reload_detected at warn")
+    h.ok(row and len(row["detail"]["ua"]) == 160 and len(row["detail"]["message"]) == 200 and row["detail"]["editor_open"] is True and row["detail"]["ms_since_mount"] == 41234, "client-log: values clipped, types kept")
+    await call("POST", CL, headers=ADMIN, body={"event": "editor_restored"})
+    await call("POST", CL, headers=ADMIN, body={"event": "js_error", "detail": {"message": "x is not a function"}})
+    await call("POST", CL, headers=ADMIN, body={"event": "unhandled_rejection", "detail": {}})
+    e = await call("POST", CL, headers=ADMIN, body={"event": "drop_tables"}, expect=400)
+    h.ok(e["error"] == "invalid_client_event", "client-log: unknown event refused")
+    await call("POST", CL, headers=ADMIN, body={"detail": {}}, expect=400)
+    for bad in ({"draft": "secret text"}, {"name": "Anons"}, {"message": {"a": 1}}, {"tab": ["events"]}, {"in_telegram": "yes"}, {"ms_since_mount": True}):
+        e = await call("POST", CL, headers=ADMIN, body={"event": "js_error", "detail": bad}, expect=400)
+        h.ok(e["error"] == "invalid_client_detail", f"client-log: detail {list(bad)} refused")
+    e = await call("POST", CL, headers=ADMIN, body={"event": "js_error", "detail": {"message": "я" * 700}}, expect=400)
+    h.ok(e["error"] == "invalid_client_detail", "client-log: detail over 1 KB refused")
+    await call("POST", CL, headers=ADMIN, body={"event": "js_error", "detail": "text"}, expect=400)
+    await call("POST", CL, headers=ADMIN, raw="not json", expect=400)
+    await call("POST", CL, headers={"X-Uid": "1"}, body={"event": "js_error"}, expect=403)
+    await call("POST", CL, body={"event": "js_error"}, expect=403)
+    logged = await call("GET", f"{PREFIX_A}/logs?limit=100", headers=ADMIN)
+    names = [r["event"] for r in logged["rows"]]
+    h.ok({"client_editor_restored", "client_js_error", "client_unhandled_rejection"} <= set(names) and "client_drop_tables" not in names, "client-log: accepted events are in the journal, refused ones are not")
+    h.ok(all(set(r["detail"]) <= {"nav_type", "visibility", "in_telegram", "ua", "editor_open", "tab", "message", "ms_since_mount", "last_pagehide", "error_code"} for r in logged["rows"] if r["event"].startswith("client_")), "client-log: only allowlisted detail keys stored")
+    h.ok(not any("secret text" in json.dumps(r["detail"], ensure_ascii=False) for r in logged["rows"]), "client-log: refused payload content is never stored")
+    dump = await call("GET", f"{PREFIX_A}/logs/download", headers=ADMIN)
+    h.ok("client_page_reload_detected" in dump and "masked" in dump, "client-log: events appear in the masked journal download")
+    other = {"X-Admin": "1", "X-Admin-Tg": "999777"}
+    codes = [(await client.post(CL, headers=other, json={"event": "js_error"})).status for _ in range(22)]
+    h.ok(codes[:20] == [200] * 20 and codes[20:] == [429, 429], f"client-log: rate limit 20/min per admin ({codes[18:]})")
+    d = await call("POST", CL, headers=ADMIN, body={"event": "js_error"})
+    h.ok(d["ok"], "client-log: limit is per admin")
 
     print("media")
     jpeg = b"\xff\xd8\xff\xe0" + b"\x00" * 40

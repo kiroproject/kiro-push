@@ -100,7 +100,7 @@ def main() -> None:
     build = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(build)
     entry = build.PLUGINS["kiro-push"]
-    h.ok(entry["version"] == "0.1.1" and entry["entry_point"] == "kiro_push:plugin", "build.py: version / entry point")
+    h.ok(entry["version"] == "0.1.2" and entry["entry_point"] == "kiro_push:plugin", "build.py: version / entry point")
     h.ok(entry["requires"] == {"user_ui": 1, "ui_composition": 1, "durable_jobs": 1, "rewards": 1}, "build.py: required capabilities include user_ui")
     frontend = entry["frontend"]
     h.ok(frontend["sections"][0]["id"] == "kiro-push" and "user" in frontend and frontend["user"]["entry"] == "customer/index.js", "manifest: admin section + user entry")
@@ -114,11 +114,12 @@ def main() -> None:
         h.ok(wanted <= set(keys), f"locales/{lang}.json has the nav keys")
     init = (ROOT / "backend/kiro_push/__init__.py").read_text(encoding="utf-8")
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8") if (ROOT / "CHANGELOG.md").exists() else ""
-    h.ok(re.search(r'^VERSION = "0\.1\.1"$', init, re.M) is not None, "plugin class version 0.1.1")
-    h.ok("## 0.1.1 — 2026-11-12" in changelog and "## 0.1.0 — 2026-11-10" in changelog, "CHANGELOG.md has '## 0.1.1 — 2026-11-12' and '## 0.1.0'")
+    h.ok(re.search(r'^VERSION = "0\.1\.2"$', init, re.M) is not None, "plugin class version 0.1.2")
+    h.ok(all(head in changelog for head in ("## 0.1.2 — 2026-11-12", "## 0.1.1 — 2026-11-12", "## 0.1.0 — 2026-11-10")), "CHANGELOG.md has the '## 0.1.2', '## 0.1.1' and '## 0.1.0' headings")
+    h.ok(changelog.index("## 0.1.2") < changelog.index("## 0.1.1") < changelog.index("## 0.1.0"), "CHANGELOG.md: newest version on top")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     api_doc = (ROOT / "docs" / "api.md").read_text(encoding="utf-8")
-    h.ok("0.1.1" in readme and "docs/api.md" in readme, "README has the version and links the API document")
+    h.ok("0.1.2" in readme and "docs/api.md" in readme, "README has the version and links the API document")
     h.ok("## HTTP API" in api_doc and "/api/plugins/kiro-push/birthdate" in api_doc, "docs/api.md has the API contract")
     h.finish()
 

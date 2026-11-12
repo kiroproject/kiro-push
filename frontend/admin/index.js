@@ -1,8 +1,9 @@
 // KIRO push: admin application (frontend host API v1).
 // Tabs: Обзор (status, stats, settings), События (list + editor), Дни рождения (scan, table, import), Журнал (deliveries, plugin journal).
 // Modules: logic.js (pure), ui.js (styles, api, dialogs), pickers.js (emoji, media), editor.js, events.js, overview.js, birthdates.js, journal.js.
-import { STYLE, api, confirmBox, fail, h, $, $$ } from "./ui.js";
-import { esc } from "./logic.js";
+import { STYLE, api, confirmBox, fail, h, $, $$, sessionStore } from "./ui.js";
+import { esc, loadTab, saveTab } from "./logic.js";
+import { startDiagnostics } from "./diag.js";
 import { mountOverview } from "./overview.js";
 import { mountEvents } from "./events.js";
 import { mountBirthdates } from "./birthdates.js";
@@ -20,7 +21,9 @@ function mountApp(target) {
     <div data-view></div>`;
   target.replaceChildren(root);
 
-  const app = { root, disposed: false, tab: remembered.tab, view: null, guard: null, overview: null, ctx: null };
+  // The last open tab survives a page reload through sessionStorage; module memory (`remembered`) is the fallback.
+  const app = { root, disposed: false, tab: loadTab(sessionStore(), TABS.map(([id]) => id), remembered.tab), view: null, guard: null, overview: null, ctx: null, diag: null };
+  app.diag = startDiagnostics({ getTab: () => app.tab });
 
   // Shared context for tabs. `caps`, `currency`, ... come from GET /overview (loaded once, refreshed by the Overview tab).
   const ctx = {
@@ -48,6 +51,7 @@ function mountApp(target) {
     app.guard = null;
     app.tab = tab;
     remembered.tab = tab;
+    saveTab(sessionStore(), tab);
     $$(root, "[data-tab]").forEach((b) => { const on = b.dataset.tab === tab; b.classList.toggle("on", on); b.setAttribute("aria-selected", String(on)); });
     const view = $(root, "[data-view]");
     view.innerHTML = `<div class="kpu-muted" role="status">Загрузка…</div>`;
@@ -69,6 +73,7 @@ function mountApp(target) {
     if (app.guard && app.guard()) {
       const ok = await confirmBox("В редакторе есть несохранённые изменения. Перейти в другой раздел без сохранения?", "Перейти без сохранения", { danger: true });
       if (!ok) return;
+      app.view?.discardDraft?.(); // the user chose to leave without saving: the autosaved draft goes too
     }
     show(b.dataset.tab);
   }));
@@ -88,6 +93,7 @@ export function updateView() {
 export function unmountView(instance) {
   if (!instance) return;
   instance.disposed = true;
+  instance.diag?.stop();
   instance.view?.destroy?.();
   instance.root.remove();
 }

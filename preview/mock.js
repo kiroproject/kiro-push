@@ -85,7 +85,7 @@ function upcoming() {
 }
 function overview() {
   return {
-    version: "0.1.1", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
+    version: "0.1.2", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
     birthdates: { eligible_users: 18400, collected: 1480, by_source: { telegram: 61, user: 1380, admin: 39 }, hidden: 9210, blocked: 612, errors: 3, cleared: 5, unknown: 7090, coverage: 0.0804, with_year: 1120 },
     upcoming: upcoming(), deliveries: { total: totals(), events: {}, promo: { issued: 1240, activated: 318 } }, backfill: state.backfill,
     events_total: state.events.length, capabilities: caps,
@@ -160,6 +160,7 @@ export async function mockFetch(input, init = {}) {
   if (r === "/deliveries") { const st = url.searchParams.get("status"); const items = state.deliveries.filter((d) => !st || d.status === st); return json({ ok: true, total: items.length, page: 1, per_page: 50, items }); }
   if (r === "/stats") { const o = overview(); return json({ ok: true, birthdates: o.birthdates, upcoming: o.upcoming, deliveries: o.deliveries }); }
   if (r === "/logs") return json({ ok: true, debug: false, counts: { info: 3, warn: 1, error: 1 }, max_rows: 5000, rows: state.logs });
+  if (r === "/client-log") { (window.__clientLogs ||= []).push(body); return json({ ok: true }); }
   if (r === "/logs/clear") return json({ ok: true, removed: state.logs.length });
   return json({ ok: false, error: "not_found" }, 404);
 }

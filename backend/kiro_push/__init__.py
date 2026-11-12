@@ -37,11 +37,18 @@ from .users import SEGMENT_LABELS, SEGMENTS, resolve_user
 
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 USER = f"/api/plugins/{PLUGIN_ID}"
 ADMIN = f"/api/admin/{PLUGIN_ID}"
 RUNTIME: dict[str, Any] = {}
 _TASKS: set[asyncio.Task] = set()
+CLIENT_EVENTS = frozenset({"page_reload_detected", "editor_restored", "js_error", "unhandled_rejection"})
+CLIENT_DETAIL_STR = {"nav_type": 24, "visibility": 16, "ua": 160, "tab": 24, "message": 200, "last_pagehide": 16}
+CLIENT_DETAIL_BOOL = frozenset({"in_telegram", "editor_open"})
+CLIENT_DETAIL_NUM = frozenset({"ms_since_mount"})
+CLIENT_DETAIL_MAX_BYTES = 1024
+CLIENT_LOG_PER_MINUTE = 20
+_CLIENT_LOG_HITS: dict[str, list[float]] = {}
 EVENT_SCAN_DELAY = 4.0  # seconds to let Core commit the new user before looking its birthdate up
 EMOJI_API = {
     "library": "/api/admin/telegram-emoji/library",
@@ -810,6 +817,49 @@ async def admin_logs_clear(request: web.Request) -> web.Response:
     return _ok({"removed": removed})
 
 
+def clean_client_detail(raw: Any) -> dict[str, Any]:
+    """Validate the small diagnostics object sent by the admin page: allowlisted keys, scalar values, <= 1 KB."""
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise PushError("invalid_client_detail")
+    if len(json.dumps(raw, ensure_ascii=False, default=str).encode("utf-8")) > CLIENT_DETAIL_MAX_BYTES:
+        raise PushError("invalid_client_detail")
+    out: dict[str, Any] = {}
+    for key, value in raw.items():
+        if key in CLIENT_DETAIL_STR and isinstance(value, str):
+            out[key] = " ".join(value.split())[: CLIENT_DETAIL_STR[key]]
+        elif key in CLIENT_DETAIL_BOOL and isinstance(value, bool):
+            out[key] = value
+        elif key in CLIENT_DETAIL_NUM and isinstance(value, (int, float)) and not isinstance(value, bool):
+            out[key] = int(max(0, min(value, 10**9)))
+        else:
+            raise PushError("invalid_client_detail")
+    return out
+
+
+async def admin_client_log(request: web.Request) -> web.Response:
+    """Client-side diagnostics (page reloaded while editing, JS errors): one warn journal entry, never draft content."""
+    body = await _json_body(request)
+    event = body.get("event")
+    if not isinstance(event, str) or event not in CLIENT_EVENTS:
+        raise PushError("invalid_client_event")
+    detail = clean_client_detail(body.get("detail"))
+    who = str(_safe_user(request) or request.get("admin_telegram_id") or "admin")
+    now = time.monotonic()
+    hits = [t for t in _CLIENT_LOG_HITS.get(who, []) if now - t < 60.0]
+    if len(hits) >= CLIENT_LOG_PER_MINUTE:
+        _CLIENT_LOG_HITS[who] = hits
+        raise PushError("rate_limited", 429)
+    hits.append(now)
+    _CLIENT_LOG_HITS[who] = hits
+    if len(_CLIENT_LOG_HITS) > 200:
+        for key in [k for k, v in _CLIENT_LOG_HITS.items() if not v or now - v[-1] >= 60.0]:
+            del _CLIENT_LOG_HITS[key]
+    await _log(request, "warn", f"client_{event}", status=200, **detail)
+    return _ok()
+
+
 # ---------------------------------------------------------------- background work
 
 
@@ -961,6 +1011,7 @@ class KiroPushPlugin(Plugin):
         r.add_get(f"{ADMIN}/logs", _guard(admin_logs))
         r.add_get(f"{ADMIN}/logs/download", _guard(admin_logs_download))
         r.add_post(f"{ADMIN}/logs/clear", _guard(admin_logs_clear))
+        r.add_post(f"{ADMIN}/client-log", _guard(admin_client_log))
 
     def locales_dir(self) -> Path | None:
         path = Path(__file__).resolve().parents[2] / "locales"

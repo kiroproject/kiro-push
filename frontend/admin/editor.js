@@ -19,12 +19,12 @@ const GIFT_HELP = {
   wheel_spins: "Билеты плагина «Колесо удачи». Не требуют подписки.",
 };
 
-export function mountEditor(host, ctx, { draft, onClose }) {
+export function mountEditor(host, ctx, { draft, baseline, onClose, onChange }) {
   const caps = ctx.caps;
   const st = {
     d: draft,
     lang: !templateIsEmpty(draft.templates.ru) || templateIsEmpty(draft.templates.en) ? "ru" : "en",
-    snapshot: JSON.stringify(draft),
+    snapshot: JSON.stringify(baseline || draft),
     saving: false,
     seq: 0,
     sample: "",
@@ -73,6 +73,7 @@ export function mountEditor(host, ctx, { draft, onClose }) {
   const refreshPreview = debounce(() => runPreview(), 550);
   function changed({ preview = true, chrome = true } = {}) {
     if (chrome) paintChrome();
+    onChange?.();
     if (preview) refreshPreview();
   }
 
@@ -553,6 +554,7 @@ export function mountEditor(host, ctx, { draft, onClose }) {
       const res = st.d.id ? await api(`/events/${st.d.id}`, "PUT", payload) : await api("/events", "POST", payload);
       if (!st.d.id) st.d.id = res.id;
       st.snapshot = JSON.stringify(st.d);
+      onChange?.({ now: true });
       st.warnings = res.warnings || [];
       paintMessage();
       showFieldErrors();
@@ -611,6 +613,7 @@ export function mountEditor(host, ctx, { draft, onClose }) {
 
   return {
     dirty: isDirty,
+    getDraft: () => st.d,
     destroy() {
       st.dead = true;
       refreshPreview.cancel();
