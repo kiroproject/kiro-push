@@ -1,5 +1,5 @@
 // KIRO push: shared event actions (test send, audience check, manual run with a retry-safe batch id).
-import { esc, num, plural, giftSummary, newBatchId, errorText } from "./logic.js";
+import { esc, num, plural, giftSummary, newBatchId, errorText, testErrorMessage, testResultNotice } from "./logic.js";
 import { api, modal, toast, fail, confirmBox, $ } from "./ui.js";
 
 // One batch id per event until its run succeeds, so pressing "Запустить" again after a network error never sends twice.
@@ -7,14 +7,35 @@ const pendingBatches = new Map();
 
 const sampleList = (sample) => (sample && sample.length ? `<div class="kpu-muted">Например: ${sample.map((s) => esc(s)).join(", ")}</div>` : "");
 
-export async function testEvent(eventId, body = {}) {
+/** Toast for a successful test send; returns the notice ({ title, details[], kind }). */
+function showTestResult(res, hasGift) {
+  const notice = testResultNotice(res, { hasGift });
+  toast([notice.title, ...notice.details].join(". "), notice.kind, notice.details.length ? 10000 : undefined);
+  return notice;
+}
+
+/** Test send of a STORED event (events list card). Returns true when the message was sent. */
+export async function testEvent(eventId, body = {}, hasGift = true) {
   try {
-    await api(`/events/${eventId}/test`, "POST", body);
-    toast("Тест отправлен вам в Telegram. Подарок не выдаётся");
+    showTestResult(await api(`/events/${eventId}/test`, "POST", body), hasGift);
     return true;
   } catch (err) {
-    fail(err);
+    toast(testErrorMessage(err), "bad", 9000);
     return false;
+  }
+}
+
+/**
+ * Test send of the CURRENT editor draft (saved or not). body = { event, language, with_gift, sample_user? }.
+ * Resolves { ok: true, notice } or { ok: false, error } (the thrown api error); the caller shows inline messages.
+ */
+export async function testDraft(body, hasGift = true) {
+  try {
+    const res = await api("/test", "POST", body);
+    return { ok: true, notice: showTestResult(res, hasGift) };
+  } catch (err) {
+    if (err.code !== "invalid_event") toast(testErrorMessage(err), "bad", 9000);
+    return { ok: false, error: err };
   }
 }
 

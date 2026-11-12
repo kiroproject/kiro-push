@@ -221,6 +221,10 @@ async def sender_tests() -> None:
     bot = FakeBot(fail_first="Bad Request: DOCUMENT_INVALID custom emoji identifier is invalid")
     res = await tg.BotGateway(bot).send(None, chat_id=7, user_id=1, message=msg)
     h.ok(res.status == "sent" and len(bot.calls) == 2 and "tg-emoji" not in bot.calls[1][1][1] and "🎁" in bot.calls[1][1][1], "Telegram rejects the custom emoji -> retried with the plain emoji")
+    h.ok(res.fallback_emoji is True and res.fallback_button_style is False, "result flags the custom-emoji fallback")
+    bot = FakeBot()
+    res = await tg.BotGateway(bot).send(None, chat_id=7, user_id=1, message=msg)
+    h.ok(res.fallback_emoji is False and res.fallback_button_style is False, "no fallback flags on a clean send")
     bot = FakeBot(always="Bad Request: custom emoji are not allowed")
     res = await tg.BotGateway(bot).send(None, chat_id=7, user_id=1, message=msg)
     h.ok(res.status == "failed" and len(bot.calls) == 2, "…and only once")
@@ -249,7 +253,12 @@ async def sender_tests() -> None:
     bot = FakeBot()
     res = await tg.BotGateway(bot).send(None, chat_id=7, user_id=1, message=msg2)
     h.ok(res.status == "sent" and not hasattr(bot.calls[0][2]["reply_markup"].inline_keyboard[0][0], "style"), "an aiogram without button styles still sends (style dropped)")
+    h.ok(res.fallback_button_style is True and res.fallback_emoji is False, "dropped button style is flagged")
     Btn.reject_style = False
+    bot = FakeBot(fail_first="Bad Request: BUTTON_STYLE_INVALID")
+    res = await tg.BotGateway(bot).send(None, chat_id=7, user_id=1, message=msg2)
+    h.ok(res.status == "sent" and len(bot.calls) == 2 and not hasattr(bot.calls[1][2]["reply_markup"].inline_keyboard[0][0], "style")
+         and res.fallback_button_style and not res.fallback_emoji, "Telegram rejects the button style -> retried without it, flagged")
     # media with a long text splits into text + media
     msg3 = tpl.Rendered(text="я" * 1500, media=[{"kind": "photo", "url": "https://x.io/a.jpg"}], buttons=[[buttons[0][0]]])
     bot = FakeBot()

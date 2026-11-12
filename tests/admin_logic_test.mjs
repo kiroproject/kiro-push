@@ -145,6 +145,31 @@ eq(L.cleanClientDetail({ draft: "secret", name: "x", message: { a: 1 }, in_teleg
 eq(L.CLIENT_EVENTS, ["page_reload_detected", "editor_restored", "js_error", "unhandled_rejection"], "client events");
 eq(Object.keys(L.LOG_EVENTS).filter((k) => k.startsWith("client_")).sort(), L.CLIENT_EVENTS.map((e) => `client_${e}`).sort(), "journal titles for every client event");
 
+// test send («Отправить тест себе»): error mapping + result notice
+const tErr = (code, data = {}, message = "m") => L.testErrorMessage({ code, data, message });
+eq(tErr("admin_telegram_unavailable"), "К вашей учётной записи администратора не привязан Telegram. Привяжите аккаунт в Minishop и напишите боту /start", "test error: no admin telegram");
+eq(tErr("bot_unavailable"), "Бот сейчас недоступен", "test error: bot unavailable");
+eq(tErr("test_failed", { detail: "Bad Request: message is too long" }), "Telegram не принял сообщение: Bad Request: message is too long", "test error: detail shown");
+eq(tErr("test_failed", { detail: "Forbidden: bot was blocked by the user" }), L.TEST_START_HINT, "test error: blocked bot -> /start hint");
+eq(tErr("test_failed", { detail: "Bad Request: chat not found" }), "Начните диалог с ботом: откройте его в Telegram и нажмите /start", "test error: chat not found -> /start hint");
+eq(tErr("test_failed", {}), "Telegram не принял сообщение", "test error: no detail");
+eq(tErr("test_failed", { detail: "x".repeat(500) }).length, "Telegram не принял сообщение: ".length + 200, "test error: detail clipped");
+eq(tErr("rate_limited"), "Слишком много тестовых отправок, подождите минуту", "test error: rate limit");
+eq(tErr("template_missing"), L.ERRORS.template_missing, "test error: template missing");
+eq(tErr("network", {}, "Нет связи с сервером"), "Нет связи с сервером", "test error: network");
+eq(tErr(undefined, {}, "boom"), "boom", "test error: unknown code keeps the message");
+eq(L.fallbackText({ emoji: false, button_style: false }), "", "fallback: none");
+eq(L.fallbackText({ emoji: true, button_style: true }), "Telegram не принял custom emoji / стиль кнопок — отправлено с обычными эмодзи", "fallback: both");
+eq(L.fallbackText({ emoji: true, button_style: false }), "Telegram не принял custom emoji — отправлено с обычными эмодзи", "fallback: emoji");
+eq(L.fallbackText({ emoji: false, button_style: true }), "Telegram не принял стиль кнопок — кнопки отправлены без цвета", "fallback: button style");
+eq(L.fallbackText(undefined), "", "fallback: missing");
+eq(L.testResultNotice({ language: "ru", used_no_gift: true, fallback: { emoji: false, button_style: false }, warnings: [] }), { title: "Тест отправлен вам в Telegram (язык: ru, без подарка)", details: [], kind: "ok" }, "notice: ok without gift");
+eq(L.testResultNotice({ language: "en", used_no_gift: false, fallback: {}, warnings: [] }).title, "Тест отправлен вам в Telegram (язык: en, с подарком)", "notice: with gift");
+eq(L.testResultNotice({ language: "ru", used_no_gift: false, fallback: {}, warnings: [] }, { hasGift: false }).title, "Тест отправлен вам в Telegram (язык: ru, без подарка)", "notice: event without a gift is «без подарка»");
+eq(L.testResultNotice({ language: "ru", used_no_gift: false, fallback: { emoji: true, button_style: true }, warnings: ["{age} вне блока"] }),
+  { title: "Тест отправлен вам в Telegram (язык: ru, с подарком)", details: ["Telegram не принял custom emoji / стиль кнопок — отправлено с обычными эмодзи", "{age} вне блока"], kind: "warn" }, "notice: fallback + warnings");
+eq(typeof L.LOG_EVENTS.test_sent, "string" && typeof L.LOG_EVENTS.test_failed, "string", "journal titles for the test events");
+
 // reasons
 eq(L.reasonText("send_error:Bad Request"), "Ошибка отправки: Bad Request", "reason prefix");
 eq(L.reasonText("user_banned"), "Пользователь забанен", "reason known");

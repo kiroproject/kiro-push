@@ -214,8 +214,8 @@ export const ERRORS = {
   invalid_button_style: "Неизвестный цвет кнопки",
   invalid_button_emoji: "ID custom emoji кнопки: число",
   // testing / running
-  admin_telegram_unavailable: "Не найден ваш Telegram-аккаунт: тест можно отправить только себе в Telegram",
-  bot_unavailable: "Бот сейчас недоступен, проверьте настройки бота",
+  admin_telegram_unavailable: "К вашей учётной записи администратора не привязан Telegram. Привяжите аккаунт в Minishop и напишите боту /start",
+  bot_unavailable: "Бот сейчас недоступен",
   test_failed: "Telegram не принял тестовое сообщение",
   run_not_supported: "Для этого вида события ручной запуск не предусмотрен: оно запускается само по расписанию",
   invalid_batch_id: "Некорректный идентификатор запуска",
@@ -249,6 +249,46 @@ export function errorText(code, data) {
   if (code && ERRORS[code]) return ERRORS[code];
   if (data && data.detail) return String(data.detail);
   return code || "Неизвестная ошибка";
+}
+
+// ---- «Отправить тест себе»: error -> actionable Russian message, result -> notice
+const BOT_NOT_STARTED = /blocked|forbidden|deactivated|chat not found|peer_id_invalid|can't initiate|have no rights/i;
+export const TEST_START_HINT = "Начните диалог с ботом: откройте его в Telegram и нажмите /start";
+
+/** Message for a failed test send. `err` is the object thrown by api(): { code, data, message }. */
+export function testErrorMessage(err) {
+  const code = err && err.code;
+  const data = (err && err.data) || {};
+  if (code === "test_failed") {
+    const detail = String(data.detail || "").replace(/\s+/g, " ").trim().slice(0, 200);
+    if (BOT_NOT_STARTED.test(detail)) return TEST_START_HINT;
+    return detail ? `Telegram не принял сообщение: ${detail}` : "Telegram не принял сообщение";
+  }
+  if (code === "rate_limited") return "Слишком много тестовых отправок, подождите минуту";
+  if (code === "network") return (err && err.message) || "Нет связи с сервером";
+  if (code && ERRORS[code]) return ERRORS[code];
+  return (err && err.message) || errorText(code, data);
+}
+
+/** Text about what Telegram did not accept in the test message ("" when nothing fell back). */
+export function fallbackText(fallback) {
+  const emoji = !!(fallback && fallback.emoji);
+  const style = !!(fallback && fallback.button_style);
+  if (emoji && style) return "Telegram не принял custom emoji / стиль кнопок — отправлено с обычными эмодзи";
+  if (emoji) return "Telegram не принял custom emoji — отправлено с обычными эмодзи";
+  if (style) return "Telegram не принял стиль кнопок — кнопки отправлены без цвета";
+  return "";
+}
+
+/** Success notice for POST /test: { title, details[], kind } (kind warn when anything fell back or warned). */
+export function testResultNotice(res, { hasGift = true } = {}) {
+  const noGift = !!(res && res.used_no_gift) || !hasGift;
+  const title = `Тест отправлен вам в Telegram (язык: ${(res && res.language) || "ru"}, ${noGift ? "без подарка" : "с подарком"})`;
+  const details = [];
+  const fb = fallbackText(res && res.fallback);
+  if (fb) details.push(fb);
+  for (const w of (res && res.warnings) || []) if (w) details.push(String(w));
+  return { title, details, kind: details.length ? "warn" : "ok" };
 }
 
 // Delivery / skip reasons written by the scheduler (deliveries.reason, gift_note). Prefix forms are handled in reasonText.
@@ -303,6 +343,8 @@ export const LOG_EVENTS = {
   admin_event_updated: "Событие изменено",
   admin_event_deleted: "Событие удалено",
   admin_event_test: "Тестовая отправка администратору",
+  test_sent: "Тест отправлен администратору",
+  test_failed: "Тест не отправлен: Telegram отказал",
   admin_event_run: "Ручной запуск события",
   admin_birthdate_set: "Админ сохранил дату рождения",
   admin_birthdate_deleted: "Админ удалил дату рождения",

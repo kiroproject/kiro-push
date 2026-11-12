@@ -108,7 +108,7 @@ export function mountEvents(host, ctx) {
       const el = $(host, `[data-ev="${ev.id}"]`);
       $(el, "[data-edit]").onclick = () => openEditor(fromEvent(ev));
       $(el, "[data-dup]").onclick = () => { const d = fromEvent(ev); d.id = null; d.enabled = false; d.name = `${ev.name} (копия)`; openEditor(d); };
-      $(el, "[data-test]").onclick = (e) => busy(e.currentTarget, () => testEvent(ev.id, {}));
+      $(el, "[data-test]").onclick = (e) => busy(e.currentTarget, () => testEvent(ev.id, {}, !!(ev.gift && ev.gift.kind !== "none")));
       $(el, "[data-run]")?.addEventListener("click", (e) => busy(e.currentTarget, async () => { if (await runEvent(ev, currency)) list(); }));
       $(el, "[data-del]").onclick = async () => {
         if (!(await confirmBox(`Удалить событие «${esc(ev.name)}»? Оно перестанет отправляться. История доставок останется в журнале.`, "Удалить", { danger: true }))) return;

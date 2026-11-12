@@ -1,6 +1,6 @@
 # HTTP API и настройки KIRO Push
 
-Контракт плагина `kiro-push` 0.1.2. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
+Контракт плагина `kiro-push` 0.1.3. Общий обзор: [README](../README.md), устройство: [architecture.md](architecture.md).
 
 ## Настройки (`PUT /config`)
 
@@ -70,9 +70,20 @@
   Ответ: `{rendered: {text, media, buttons, disable_notification, protect_content, disable_preview, language,
   used_no_gift, visible_length, warnings}, errors, warnings, gift_text}`. Для черновика с ошибками
   `rendered = null`, `errors` заполнен. 404 `template_missing`, `user_not_found`.
-- `POST /events/{id}/test` `{language?, with_gift?, sample_user?}` отправляет сообщение только запросившему админу
-  (его Telegram id берётся из сессии: `request["admin_telegram_id"]`), подарок **не выдаётся**. Ошибки 403
-  `admin_telegram_unavailable`, 503 `bot_unavailable`, 502 `test_failed` (`detail`).
+- `POST /test` `{event, language?, with_gift?, sample_user?}` — тест **текущего черновика** (то же тело `event`, что у
+  `POST /preview`, тот же путь проверки и рендера) только запросившему админу: Telegram id берётся из сессии
+  (`request["admin_telegram_id"]`), получатель в теле игнорируется и не принимается. Подарок **не выдаётся**, промокод
+  не создаётся (в тексте тестовый `PUSH-AB12CD`), `ext_kiro_push_deliveries`, список заблокировавших и даты рождения не
+  затрагиваются. `language` по умолчанию: язык по умолчанию из настроек, затем любой заполненный шаблон;
+  `sample_user` по умолчанию: сам админ, если он есть среди пользователей. Ответ:
+  `{ok: true, sent: true, language, used_no_gift, fallback: {emoji, button_style}, message_id, warnings}`;
+  `fallback.emoji` / `fallback.button_style` = `true`, если Telegram отклонил custom emoji / стиль кнопок и сообщение ушло
+  с обычными эмодзи / без стиля. Ошибки: 400 `invalid_event` (`issues`, `warnings`), `event_required`,
+  `invalid_language`; 404 `template_missing`, `user_not_found`; 403 `admin_telegram_unavailable`; 503 `bot_unavailable`;
+  502 `test_failed` (`detail`); 429 `rate_limited` (10 тестов в минуту на администратора, счётчик в памяти).
+  В журнал пишется `test_sent` (язык, черновик/сохранённое, без подарка, флаги fallback) без текста и идентификаторов.
+- `POST /events/{id}/test` `{language?, with_gift?, sample_user?}` — то же для **сохранённого** события (общая реализация
+  с `POST /test`, ответ и ошибки те же, плюс 404 `event_not_found`).
 - `POST /events/{id}/run` `{dry_run?, batch_id?, audience?}` — ручной запуск (kind `manual`, `one_time`, `fixed_date`;
   для `birthday` и `registration_anniversary` 400 `run_not_supported`). Пробный запуск →
   `{dry_run: true, matched, sample: ["@name", ...]}`. Настоящий → `{dry_run: false, batch_id, queued, already, matched, sample}`;

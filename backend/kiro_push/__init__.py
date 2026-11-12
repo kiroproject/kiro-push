@@ -37,7 +37,7 @@ from .users import SEGMENT_LABELS, SEGMENTS, resolve_user
 
 logger = logging.getLogger(__name__)
 
-VERSION = "0.1.2"
+VERSION = "0.1.3"
 USER = f"/api/plugins/{PLUGIN_ID}"
 ADMIN = f"/api/admin/{PLUGIN_ID}"
 RUNTIME: dict[str, Any] = {}
@@ -49,6 +49,8 @@ CLIENT_DETAIL_NUM = frozenset({"ms_since_mount"})
 CLIENT_DETAIL_MAX_BYTES = 1024
 CLIENT_LOG_PER_MINUTE = 20
 _CLIENT_LOG_HITS: dict[str, list[float]] = {}
+TEST_PER_MINUTE = 10
+_TEST_HITS: dict[str, list[float]] = {}
 EVENT_SCAN_DELAY = 4.0  # seconds to let Core commit the new user before looking its birthdate up
 EMOJI_API = {
     "library": "/api/admin/telegram-emoji/library",
@@ -385,9 +387,10 @@ async def _preview_values(
     return values
 
 
-async def _render_preview(
+async def _render_core(
     session: Any, config: dict[str, Any], event: dict[str, Any], body: dict[str, Any], currency: str
-) -> dict[str, Any]:
+) -> tuple[Any, list[str], list[str]]:
+    """The one rendering path for previews and test sends: -> (Rendered, validation errors, warnings)."""
     language = str(body.get("language") or "ru").lower()
     if language not in ("ru", "en"):
         raise PushError("invalid_language")
@@ -399,6 +402,13 @@ async def _render_preview(
     rendered = templates.render_message(tpl, values, gift_available=gift_available, language=language)
     errors, warnings = templates.validate_template(tpl, gift_kind=event["gift"]["kind"])
     warnings += templates.preview_warnings(tpl, event)
+    return rendered, errors, warnings
+
+
+async def _render_preview(
+    session: Any, config: dict[str, Any], event: dict[str, Any], body: dict[str, Any], currency: str
+) -> dict[str, Any]:
+    rendered, errors, warnings = await _render_core(session, config, event, body, currency)
     return {"rendered": rendered.to_dict(), "errors": errors, "warnings": warnings, "gift_text": gifts.gift_text(event["gift"], currency)}
 
 
@@ -436,33 +446,102 @@ async def admin_preview_draft(request: web.Request) -> web.Response:
     return _ok(data)
 
 
-async def admin_event_test(request: web.Request) -> web.Response:
-    """Send the template to the requesting admin only. The gift is NOT granted; its text is just shown."""
+def _rate_limited(store: dict[str, list[float]], who: str, limit: int) -> bool:
+    """In-memory sliding one-minute window; records the hit when allowed."""
+    now = time.monotonic()
+    hits = [t for t in store.get(who, []) if now - t < 60.0]
+    if len(hits) >= limit:
+        store[who] = hits
+        return True
+    hits.append(now)
+    store[who] = hits
+    if len(store) > 200:
+        for key in [k for k, v in store.items() if not v or now - v[-1] >= 60.0]:
+            del store[key]
+    return False
+
+
+async def _send_test(request: web.Request, body: dict[str, Any], load_event: Any, *, draft: bool) -> web.Response:
+    """Render one event (stored or draft) exactly like a preview and send it to the requesting admin only.
+
+    The recipient is always ``request['admin_telegram_id']``. Nothing is granted, no promo code is issued, no
+    delivery / blocked / birthdate row is touched (a media file_id cache update is the only write).
+    """
     admin_tg = request.get("admin_telegram_id")
     if not admin_tg:
         raise PushError("admin_telegram_unavailable", 403)
-    body = await _json_body(request)
     ctx = _ctx()
-    gateway = make_gateway(ctx)
-    if gateway is None:
-        raise PushError("bot_unavailable", 503)
     async with get_session_factory(request)() as session:
         config = await load_config(session)
-        event = _event_for_render(await _event_row(session, _event_id(request)))
+        event = await load_event(session)
+        gateway = make_gateway(ctx)
+        if gateway is None:
+            raise PushError("bot_unavailable", 503)
+        if _rate_limited(_TEST_HITS, str(admin_tg), TEST_PER_MINUTE):
+            raise PushError("rate_limited", 429)
         admin_user = await resolve_user(session, str(admin_tg))
-        sample = str(admin_user["user_id"]) if admin_user else body.get("sample_user")
-        data = await _render_preview(session, config, event, {**body, "sample_user": sample}, _currency(ctx.settings))
-        language = data["rendered"]["language"]
-        rendered = templates.render_message(
-            event["templates"][language], await _preview_values(session, config, event, sample, _currency(ctx.settings), bool(body.get("with_gift", True)) and event["gift"]["kind"] != "none"),
-            gift_available=bool(body.get("with_gift", True)) and event["gift"]["kind"] != "none", language=language,
+        sample = body.get("sample_user")
+        if not (isinstance(sample, dict) or (isinstance(sample, str) and sample.strip())):
+            sample = str(admin_user["user_id"]) if admin_user else None
+        language = str(body.get("language") or "").lower()
+        if not language:
+            picked = templates.pick_template(event["templates"], None, config["default_language"])
+            if picked is None:
+                raise PushError("template_missing", 404)
+            language = picked[0]
+        rendered, _errors, warnings = await _render_core(
+            session, config, event, {**body, "language": language, "sample_user": sample}, _currency(ctx.settings)
         )
-        result = await gateway.send(session, chat_id=int(admin_tg), user_id=int(admin_user["user_id"]) if admin_user else int(admin_tg), message=rendered)
+        warnings = list(dict.fromkeys([*(event.get("warnings") or []), *warnings]))
+        result = await gateway.send(
+            session, chat_id=int(admin_tg), user_id=int(admin_user["user_id"]) if admin_user else int(admin_tg), message=rendered
+        )
         await session.commit()
     if result.status != "sent":
+        await _log(request, "warn", "test_failed", status=502, language=language, draft=draft, result=result.status)
         return _err("test_failed", 502, detail=result.error)
-    await _log(request, "info", "admin_event_test", status=200, event_id=event["id"], language=language)
-    return _ok({"message_id": result.message_id})
+    fallback = {
+        "emoji": bool(getattr(result, "fallback_emoji", False)),
+        "button_style": bool(getattr(result, "fallback_button_style", False)),
+    }
+    await _log(
+        request, "info", "test_sent", status=200, language=language, draft=draft, used_no_gift=rendered.used_no_gift,
+        fallback_emoji=fallback["emoji"], fallback_button_style=fallback["button_style"],
+    )
+    return _ok({
+        "sent": True, "language": language, "used_no_gift": rendered.used_no_gift, "fallback": fallback,
+        "message_id": result.message_id, "warnings": warnings,
+    })
+
+
+async def admin_event_test(request: web.Request) -> web.Response:
+    """Send the STORED event to the requesting admin only. The gift is NOT granted; its text is just shown."""
+    if not request.get("admin_telegram_id"):
+        raise PushError("admin_telegram_unavailable", 403)
+    body = await _json_body(request)
+    event_id = _event_id(request)
+
+    async def load(session: Any) -> dict[str, Any]:
+        return _event_for_render(await _event_row(session, event_id))
+
+    return await _send_test(request, body, load, draft=False)
+
+
+async def admin_test_draft(request: web.Request) -> web.Response:
+    """Send the CURRENT (possibly unsaved) editor draft to the requesting admin only: body {event, language?, with_gift?, sample_user?}."""
+    if not request.get("admin_telegram_id"):
+        raise PushError("admin_telegram_unavailable", 403)
+    body = await _json_body(request)
+    draft = body.get("event")
+    if not isinstance(draft, dict):
+        raise PushError("event_required")
+
+    async def load(session: Any) -> dict[str, Any]:
+        raw = {**draft, "name": draft.get("name") or "draft", "kind": draft.get("kind") or "manual"}
+        clean = eventdefs.clean_event(raw, wheel_installed=await gifts.wheel_installed(session))  # invalid_event -> 400 + issues
+        return {**clean, "id": 0}
+
+    return await _send_test(request, body, load, draft=True)
 
 
 async def admin_event_run(request: web.Request) -> web.Response:
@@ -846,16 +925,8 @@ async def admin_client_log(request: web.Request) -> web.Response:
         raise PushError("invalid_client_event")
     detail = clean_client_detail(body.get("detail"))
     who = str(_safe_user(request) or request.get("admin_telegram_id") or "admin")
-    now = time.monotonic()
-    hits = [t for t in _CLIENT_LOG_HITS.get(who, []) if now - t < 60.0]
-    if len(hits) >= CLIENT_LOG_PER_MINUTE:
-        _CLIENT_LOG_HITS[who] = hits
+    if _rate_limited(_CLIENT_LOG_HITS, who, CLIENT_LOG_PER_MINUTE):
         raise PushError("rate_limited", 429)
-    hits.append(now)
-    _CLIENT_LOG_HITS[who] = hits
-    if len(_CLIENT_LOG_HITS) > 200:
-        for key in [k for k, v in _CLIENT_LOG_HITS.items() if not v or now - v[-1] >= 60.0]:
-            del _CLIENT_LOG_HITS[key]
     await _log(request, "warn", f"client_{event}", status=200, **detail)
     return _ok()
 
@@ -986,6 +1057,7 @@ class KiroPushPlugin(Plugin):
         r.add_get(f"{ADMIN}/events", _guard(admin_events))
         r.add_post(f"{ADMIN}/events", _guard(admin_event_create))
         r.add_post(f"{ADMIN}/preview", _guard(admin_preview_draft))
+        r.add_post(f"{ADMIN}/test", _guard(admin_test_draft))
         r.add_get(ADMIN + "/events/{event_id:\\d+}", _guard(admin_event_get))
         r.add_put(ADMIN + "/events/{event_id:\\d+}", _guard(admin_event_update))
         r.add_delete(ADMIN + "/events/{event_id:\\d+}", _guard(admin_event_delete))

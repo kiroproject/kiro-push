@@ -47,7 +47,7 @@ ADMIN = {"X-Admin": "1", "X-Admin-Tg": "999001"}
 def plugin_wiring_tests() -> None:
     print("plugin wiring")
     p = pkg.plugin
-    h.ok(p.name == "kiro-push" and p.version == "0.1.2", "name / version")
+    h.ok(p.name == "kiro-push" and p.version == "0.1.3", "name / version")
     h.ok([m.id for m in p.migrations()] == ["kiro-push.0001_initial"], "migration chain kiro-push.0001_*")
     ext = p.extensions(SimpleNamespace())
     job = ext.jobs[0]
@@ -166,7 +166,7 @@ async def main_async() -> None:
     await call("PUT", f"{PREFIX_A}/config", headers=ADMIN, body={"timezone": "Europe/Moscow"})
     d = await call("GET", f"{PREFIX_A}/overview", headers=ADMIN)
     caps = d["capabilities"]
-    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.2", "overview: flags")
+    h.ok(d["wheel_installed"] is False and d["bot_available"] and d["version"] == "0.1.3", "overview: flags")
     h.ok({k["id"] for k in caps["event_kinds"]} == {"birthday", "registration_anniversary", "fixed_date", "one_time", "manual"}, "capabilities: event kinds")
     h.ok([g["available"] for g in caps["gift_kinds"] if g["id"] == "wheel_spins"] == [False], "capabilities: wheel_spins unavailable without the wheel")
     h.ok(len(caps["placeholders"]) == 11 and caps["limits"]["text"] == 4096 and caps["limits"]["caption"] == 1024 and caps["emoji_library"]["library"].endswith("/library"), "capabilities: placeholders, limits, emoji endpoints")
@@ -231,6 +231,85 @@ async def main_async() -> None:
     d = await call("POST", f"{PREFIX_A}/events/{eid}/test", headers=ADMIN, body={"language": "ru"}, expect=502)
     h.ok(d["error"] == "test_failed" and d["detail"] == "boom", "test send failure reported")
     gw.sends.clear()
+    # draft test send (POST /test): the current unsaved draft goes to the requesting admin only
+    TEST = f"{PREFIX_A}/test"
+    draft = {"name": "Анонс", "kind": "manual", "enabled": False, "gift": {"kind": "days", "days": 7},
+             "templates": {"ru": {"text": "Анонс для {name}. Подарок: {gift}.", "text_no_gift": "Анонс для {name}."}}}
+    events_before = await db.count("ext_kiro_push_events")
+    state_before = [await db.count(t) for t in ("ext_kiro_push_deliveries", "ext_kiro_push_blocked", "ext_kiro_push_birthdates")]
+    sent_before, grants_before, codes_before = len(gw.sent), len(h.GRANTS), len(h.ISSUED_CODES)
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft, "language": "ru"})
+    h.ok(d["ok"] and d["sent"] is True and d["language"] == "ru" and d["used_no_gift"] is False and d["fallback"] == {"emoji": False, "button_style": False}
+         and d["message_id"] and d["warnings"] == [], f"draft test: response contract ({d})")
+    h.ok(len(gw.sent) == sent_before + 1 and gw.sent[-1][0] == 999001 and gw.sent[-1][1].text == "Анонс для Босс. Подарок: +7 дней.", f"draft test: the draft goes to the admin's own id ({gw.sent[-1][1].text!r})")
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft, "language": "ru", "with_gift": False})
+    h.ok(d["used_no_gift"] is True and gw.sent[-1][1].text == "Анонс для Босс.", "draft test: «без подарка» uses text_no_gift")
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft, "chat_id": 12345, "telegram_id": 12345, "user_id": 3, "recipient": 12345, "sample_user": {"name": "Тест"}})
+    h.ok(gw.sent[-1][0] == 999001 and gw.sent[-1][1].text.startswith("Анонс для Тест."), "draft test: a recipient in the body is ignored; sample overrides work")
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft})
+    h.ok(d["language"] == "ru", "draft test: language defaults to the first filled template")
+    await call("POST", TEST, headers=ADMIN, body={"event": draft, "language": "en"}, expect=404)
+    await call("POST", TEST, headers=ADMIN, body={"event": draft, "language": "de"}, expect=400)
+    await call("POST", TEST, headers=ADMIN, body={"event": draft, "sample_user": "ghost"}, expect=404)
+    await call("POST", TEST, headers=ADMIN, body={}, expect=400)
+    await call("POST", TEST, headers={"X-Admin": "1"}, body={"event": draft}, expect=403)
+    await call("POST", TEST, headers={}, body={"event": draft}, expect=403)
+    n_sent = len(gw.sent)
+    d = await call("POST", TEST, headers=ADMIN, body={"event": {**draft, "templates": {"ru": {"text": "<b>x {oops}"}}}}, expect=400)
+    h.ok(d["error"] == "invalid_event" and len(d["issues"]) >= 2 and "warnings" in d and len(gw.sent) == n_sent, "draft test: invalid draft -> 400 with issues, nothing sent")
+    d = await call("POST", TEST, headers=ADMIN, body={"event": {**draft, "gift": {"kind": "days", "days": 0}}}, expect=400)
+    h.ok(d["error"].startswith("invalid_gift") and len(gw.sent) == n_sent, "draft test: invalid gift rejected")
+    d = await call("POST", TEST, headers=ADMIN, body={"event": {**draft, "templates": {"ru": {"text": "Привет {name}{age}"}}}})
+    h.ok(any("{age}" in w for w in d["warnings"]), "draft test: warnings are returned with the success")
+    # failures
+    pkg._TEST_HITS.clear()  # the in-memory window is shared by the whole test run
+    gw.sends[999001] = [tg.SendResult("failed", "Bad Request: message is too long")]
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft}, expect=502)
+    h.ok(d["error"] == "test_failed" and d["detail"] == "Bad Request: message is too long", "draft test: gateway failure -> 502 with detail")
+    gw.sends[999001] = [tg.SendResult("blocked", "Forbidden: bot was blocked by the user")]
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft}, expect=502)
+    h.ok(d["error"] == "test_failed" and "blocked" in d["detail"], "draft test: blocked bot -> 502 with detail")
+    gw.sends.clear()
+    saved_bot, saved_gateway = ctx.bot, pkg.RUNTIME.get("gateway")
+    ctx.bot, pkg.RUNTIME["gateway"] = None, None
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft}, expect=503)
+    h.ok(d["error"] == "bot_unavailable", "draft test: no bot -> 503 bot_unavailable")
+    d = await call("POST", f"{PREFIX_A}/events/{eid}/test", headers=ADMIN, body={}, expect=503)
+    ctx.bot, pkg.RUNTIME["gateway"] = saved_bot, saved_gateway
+    # fallback flags are surfaced
+    plain_send = gw.send
+
+    async def flagged_send(session, *, chat_id, user_id, message):
+        await plain_send(session, chat_id=chat_id, user_id=user_id, message=message)
+        return tg.SendResult("sent", message_id=77, fallback_emoji=True, fallback_button_style=True)
+
+    gw.send = flagged_send
+    d = await call("POST", TEST, headers=ADMIN, body={"event": draft})
+    h.ok(d["fallback"] == {"emoji": True, "button_style": True} and d["message_id"] == 77, "draft test: fallback flags surfaced")
+    del gw.send
+    # nothing persisted / granted
+    h.ok(await db.count("ext_kiro_push_events") == events_before, "draft test: the draft is not saved")
+    h.ok([await db.count(t) for t in ("ext_kiro_push_deliveries", "ext_kiro_push_blocked", "ext_kiro_push_birthdates")] == state_before, "draft test: deliveries / blocked / birthdates untouched")
+    h.ok(len(h.GRANTS) == grants_before and len(h.ISSUED_CODES) == codes_before, "draft test: no gift granted, no promo code issued")
+    # journal: test_sent without personal data
+    logs = await call("GET", f"{PREFIX_A}/logs?limit=500", headers=ADMIN)
+    sent_rows = [r for r in logs["rows"] if r["event"] == "test_sent"]
+    dump = json.dumps(sent_rows, ensure_ascii=False)
+    h.ok(sent_rows and all(set(r["detail"]) == {"language", "draft", "used_no_gift", "fallback_emoji", "fallback_button_style"} for r in sent_rows), "draft test: journal entries test_sent")
+    h.ok("999001" not in dump and "Анонс" not in dump and "Босс" not in dump, "draft test: journal has no recipient id and no message text")
+    h.ok(any(r["event"] == "test_failed" and r["level"] == "warn" for r in logs["rows"]), "draft test: failure journaled at warn")
+    # the stored-event endpoint still works and shares the contract
+    pkg._TEST_HITS.clear()
+    d = await call("POST", f"{PREFIX_A}/events/{eid}/test", headers=ADMIN, body={"language": "ru"})
+    h.ok(d["sent"] is True and d["fallback"] == {"emoji": False, "button_style": False} and gw.sent[-1][0] == 999001, "stored event test still works")
+    await call("POST", f"{PREFIX_A}/events/9999/test", headers=ADMIN, body={}, expect=404)
+    # rate limit: 10 per minute per admin, independent between admins
+    other_admin = {"X-Admin": "1", "X-Admin-Tg": "999555"}
+    codes = [(await client.post(TEST, headers=other_admin, json={"event": draft})).status for _ in range(12)]
+    h.ok(codes[:10] == [200] * 10 and codes[10:] == [429, 429], f"draft test: rate limit 10/min per admin ({codes})")
+    d = await call("POST", TEST, headers=other_admin, body={"event": draft}, expect=429)
+    h.ok(d["error"] == "rate_limited", "draft test: 429 rate_limited")
+    h.ok(all(c == 999555 for c, _m in gw.sent[-10:]), "draft test: the other admin's tests went to his own id")
     # manual run
     d = await call("POST", f"{PREFIX_A}/events", headers=ADMIN, body={"name": "Promo", "kind": "manual", "enabled": True,
                                                                      "templates": {"ru": {"text": "Акция, {name}!"}}}, expect=201)
@@ -346,7 +425,7 @@ async def main_async() -> None:
     h.ok(d["rows"] and d["max_rows"] == 5000 and "counts" in d, "journal list")
     d = await call("GET", f"{PREFIX_A}/logs?level=warn", headers=ADMIN)
     report = await call("GET", f"{PREFIX_A}/logs/download", headers=ADMIN)
-    h.ok("KIRO Push journal" in report and "kiro-push 0.1.2" in report and "masked" in report, "journal download (header + masked)")
+    h.ok("KIRO Push journal" in report and "kiro-push 0.1.3" in report and "masked" in report, "journal download (header + masked)")
     d = await call("POST", f"{PREFIX_A}/logs/clear", headers=ADMIN, body={})
     h.ok(d["removed"] > 0, "journal cleared")
 

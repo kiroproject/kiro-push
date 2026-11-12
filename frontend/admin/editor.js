@@ -3,10 +3,10 @@ import {
   esc, num, clone, debounce, plural, KIND_RU, SEGMENT_RU, SECTIONS_RU, MEDIA_RU, STYLE_RU, BUTTON_KIND_RU, MONTHS_RU, GIFT_KIND_RU,
   RUNNABLE_KINDS, TOOLBAR, scheduleSummary, offsetText, giftSummary, currencySymbol, majorToMinor, wrapSelection,
   insertText, emojiTag, linkOpen, visibleLength, parseTelegramHtml, renderTree, emptyTemplate, templateIsEmpty, toPayload, fromEvent, blankDraft,
-  draftProblems, splitIssues, FIELD_OF_ERROR, fmtSize,
+  draftProblems, splitIssues, FIELD_OF_ERROR, fmtSize, testErrorMessage, ERRORS,
 } from "./logic.js";
 import { api, modal, toast, fail, confirmBox, busy, h, $, $$ } from "./ui.js";
-import { testEvent, checkAudience, runEvent } from "./actions.js";
+import { testDraft, checkAudience, runEvent } from "./actions.js";
 import { pickEmoji, emojiMediaUrl, uploadFile, pickStoredMedia, mediaUrl } from "./pickers.js";
 
 const FIELD_ERR_ATTR = "data-err";
@@ -38,6 +38,7 @@ export function mountEditor(host, ctx, { draft, baseline, onClose, onChange }) {
     previewState: "idle",
     batchId: null,
     dead: false,
+    testing: false,
   };
   const isDirty = () => JSON.stringify(st.d) !== st.snapshot;
   const tpl = () => st.d.templates[st.lang];
@@ -52,6 +53,8 @@ export function mountEditor(host, ctx, { draft, baseline, onClose, onChange }) {
       <span class="kpu-grow"></span><span class="kpu-muted" data-state></span>
     </div><div data-err="name"></div></div>
     <div class="kpu-row" data-actions></div>
+    <div class="kpu-muted" data-test-hint>Тест уходит только вам в личные сообщения. Подарок не выдаётся, промокод в сообщении тестовый</div>
+    <div data-test-note aria-live="polite"></div>
     <div data-top-issues></div>
     <div class="kpu-compose">
       <div class="kpu-stack">
@@ -115,10 +118,10 @@ export function mountEditor(host, ctx, { draft, baseline, onClose, onChange }) {
     $(host, "[data-enabled]").addEventListener("change", (e) => { st.d.enabled = e.target.checked; $(host, "[data-sw] span:last-child").textContent = st.d.enabled ? "Включено" : "Выключено"; changed({ preview: false }); });
     const runnable = RUNNABLE_KINDS.includes(st.d.kind);
     $(host, "[data-actions]").innerHTML = `<button class="kpu-btn kpu-primary" data-save>Сохранить</button>
-      <button class="kpu-btn" data-test data-needs-saved>Отправить тест себе</button>
+      <button class="kpu-btn" data-test>Отправить тест себе</button>
       ${runnable ? `<button class="kpu-btn" data-check data-needs-saved>Проверить аудиторию</button><button class="kpu-btn" data-run data-needs-saved>Запустить…</button>` : `<span class="kpu-muted">Событие запускается само по расписанию; получатели определяются в момент отправки.</span>`}`;
     $(host, "[data-save]").onclick = (e) => busy(e.currentTarget, () => save());
-    $(host, "[data-test]").onclick = (e) => busy(e.currentTarget, () => sendTest());
+    $(host, "[data-test]").onclick = (e) => sendTest(e.currentTarget);
     $(host, "[data-check]")?.addEventListener("click", (e) => busy(e.currentTarget, () => checkAudienceNow()));
     $(host, "[data-run]")?.addEventListener("click", (e) => busy(e.currentTarget, () => runNow()));
   }
@@ -578,9 +581,36 @@ export function mountEditor(host, ctx, { draft, baseline, onClose, onChange }) {
     return true;
   }
 
-  async function sendTest() {
-    if (!(await ensureSaved("Тестовая отправка"))) return;
-    await testEvent(st.d.id, { language: st.lang, with_gift: st.withGift && giftOn(), ...(st.sample ? { sample_user: st.sample } : {}) });
+  function showTestNote(kind, title, details = []) {
+    const el = $(host, "[data-test-note]");
+    if (!el) return;
+    el.innerHTML = title ? `<div class="kpu-banner ${kind}" role="${kind === "bad" ? "alert" : "status"}"><b>${esc(title)}</b>${details.length ? `<ul>${details.map((d) => `<li>${esc(d)}</li>`).join("")}</ul>` : ""}</div>` : "";
+  }
+
+  // Sends the CURRENT draft (saved or not, same body as the preview) to the admin's own Telegram. Never needs saving first.
+  async function sendTest(button) {
+    if (st.testing) return;
+    showTestNote("", "");
+    if (templateIsEmpty(tpl())) return showTestNote("bad", ERRORS.template_missing);
+    const event = toPayload(st.d, { forPreview: true });
+    if (event.gift.kind === "balance" && event.gift.amount_minor === null) return showTestNote("bad", "Укажите корректную сумму подарка");
+    const body = { event, language: st.lang, with_gift: st.withGift && giftOn() };
+    if (st.sample) body.sample_user = st.sample; else if (st.noYear) body.sample_user = { age: "" };
+    st.testing = true;
+    const label = button ? button.textContent : "";
+    if (button) { button.disabled = true; button.textContent = "Отправляю…"; }
+    try {
+      const r = await testDraft(body, giftOn());
+      if (st.dead) return;
+      if (r.ok) showTestNote(r.notice.kind, r.notice.title, r.notice.details);
+      else if (r.error.code === "invalid_event") {
+        applyApiError(r.error);
+        showTestNote("bad", "Тест не отправлен: в событии есть ошибки, они показаны на странице");
+      } else showTestNote("bad", testErrorMessage(r.error));
+    } finally {
+      st.testing = false;
+      if (button && button.isConnected) { button.disabled = false; button.textContent = label; }
+    }
   }
 
   async function checkAudienceNow() {

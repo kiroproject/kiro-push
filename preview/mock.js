@@ -85,7 +85,7 @@ function upcoming() {
 }
 function overview() {
   return {
-    version: "0.1.2", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
+    version: "0.1.3", config: state.config, wheel_installed: false, bot_available: true, currency: "RUB",
     birthdates: { eligible_users: 18400, collected: 1480, by_source: { telegram: 61, user: 1380, admin: 39 }, hidden: 9210, blocked: 612, errors: 3, cleared: 5, unknown: 7090, coverage: 0.0804, with_year: 1120 },
     upcoming: upcoming(), deliveries: { total: totals(), events: {}, promo: { issued: 1240, activated: 318 } }, backfill: state.backfill,
     events_total: state.events.length, capabilities: caps,
@@ -142,6 +142,20 @@ export async function mockFetch(input, init = {}) {
     if (m[2] === "/run") return body.dry_run ? json({ ok: true, dry_run: true, matched: 532, sample: ["@ivan_k", "@maria", "Алексей"] }) : json({ ok: true, dry_run: false, batch_id: body.batch_id, queued: 532, already: 0, matched: 532, sample: [] });
   }
   if (r === "/preview") { const [s, d] = preview(body); return json(d, s); }
+  if (r === "/test" && method === "POST") {
+    // Draft test send: nothing is stored. Debug hooks: globalThis.__kpTestMode = "no_tg" | "no_bot" | "blocked" | "fail" | "fallback".
+    globalThis.__kpLastTestBody = body;
+    const mode = globalThis.__kpTestMode || "";
+    if (!body.event || typeof body.event !== "object") return json({ ok: false, error: "event_required" }, 400);
+    if (mode === "no_tg") return json({ ok: false, error: "admin_telegram_unavailable" }, 403);
+    const [s, d] = preview({ ...body, language: body.language || "ru" });
+    if (s !== 200) return json(d, s);
+    if (d.errors.length) return json({ ok: false, error: "invalid_event", issues: d.errors, warnings: d.warnings }, 400);
+    if (mode === "no_bot") return json({ ok: false, error: "bot_unavailable" }, 503);
+    if (mode === "blocked") return json({ ok: false, error: "test_failed", detail: "Forbidden: bot was blocked by the user" }, 502);
+    if (mode === "fail") return json({ ok: false, error: "test_failed", detail: "Bad Request: message is too long" }, 502);
+    return json({ ok: true, sent: true, language: d.rendered.language, used_no_gift: d.rendered.used_no_gift, message_id: 7, warnings: d.warnings, fallback: { emoji: mode === "fallback", button_style: mode === "fallback" } });
+  }
   if (r === "/media" && method === "GET") return json({ ok: true, media: [{ id: "a".repeat(32), kind: "document", filename: "guide.pdf", content_type: "application/pdf", size: 240000, created_at: ago(900) }] });
   if (r === "/birthdates" && method === "GET") {
     const q = (url.searchParams.get("q") || "").toLowerCase();

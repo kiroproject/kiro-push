@@ -29,6 +29,8 @@ class SendResult:
     error: str = ""
     message_id: int | None = None
     retry_after: int = 0
+    fallback_emoji: bool = False  # custom emoji were replaced by plain ones
+    fallback_button_style: bool = False  # the button `style` was dropped
 
 
 @dataclass
@@ -121,6 +123,11 @@ def custom_emoji_error(message: str) -> bool:
     )
 
 
+def button_style_error(message: str) -> bool:
+    lowered = message.lower()
+    return "button_style" in lowered or "button style" in lowered or ("style" in lowered and "button" in lowered)
+
+
 class _UnicodeFallback(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=False)
@@ -199,7 +206,9 @@ class BotGateway:
                 self._username = ""
         return self._username
 
-    async def _markup(self, rows: list[list[dict[str, Any]]], *, strip_custom: bool) -> Any:
+    async def _markup(
+        self, rows: list[list[dict[str, Any]]], *, strip_custom: bool, strip_style: bool = False, notes: set[str] | None = None
+    ) -> Any:
         if not rows:
             return None
         from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -227,12 +236,14 @@ class BotGateway:
                     kwargs["url"] = b["url"]
                 if icon:
                     kwargs["icon_custom_emoji_id"] = icon
-                if b.get("style"):
+                if b.get("style") and not strip_style:
                     kwargs["style"] = b["style"]
                 try:
                     built.append(InlineKeyboardButton(**kwargs))
                 except Exception:  # noqa: BLE001 - an aiogram without the `style` field
                     kwargs.pop("style", None)
+                    if notes is not None and b.get("style"):
+                        notes.add("button_style")
                     built.append(InlineKeyboardButton(**kwargs))
             keyboard.append(built)
         return InlineKeyboardMarkup(inline_keyboard=keyboard)
@@ -285,15 +296,27 @@ class BotGateway:
             )
 
     async def send(self, session: Any, *, chat_id: int, user_id: int, message: Any) -> SendResult:
+        strip_custom = strip_style = False
+        notes: set[str] = set()
         try:
-            try:
-                return await self._send(session, chat_id, message, strip_custom=False)
-            except Exception as exc:  # noqa: BLE001
-                kind, text_, _ = classify_error(exc)
-                if kind == "failed" and custom_emoji_error(text_):
-                    # Same recovery as Core's middleware: plain emoji instead of custom ones, one retry.
-                    return await self._send(session, chat_id, message, strip_custom=True)
-                raise
+            for _attempt in range(3):
+                try:
+                    result = await self._send(session, chat_id, message, strip_custom=strip_custom, strip_style=strip_style, notes=notes)
+                    result.fallback_emoji = strip_custom
+                    result.fallback_button_style = strip_style or "button_style" in notes
+                    return result
+                except Exception as exc:  # noqa: BLE001
+                    kind, text_, _ = classify_error(exc)
+                    if kind != "failed":
+                        raise
+                    # Same recovery as Core's middleware: plain emoji instead of custom ones / no button style, then retry.
+                    if custom_emoji_error(text_) and not strip_custom:
+                        strip_custom = True
+                    elif button_style_error(text_) and not strip_style:
+                        strip_style = True
+                    else:
+                        raise
+            raise RuntimeError("send_retries_exhausted")
         except Exception as exc:  # noqa: BLE001
             kind, message_text, retry = classify_error(exc)
             if kind == "retry_after":
@@ -303,10 +326,12 @@ class BotGateway:
             logger.warning("kiro-push: send to user %s failed: %s", user_id, message_text)
             return SendResult("failed", message_text)
 
-    async def _send(self, session: Any, chat_id: int, message: Any, *, strip_custom: bool) -> SendResult:
+    async def _send(
+        self, session: Any, chat_id: int, message: Any, *, strip_custom: bool, strip_style: bool = False, notes: set[str] | None = None
+    ) -> SendResult:
         body = unicode_html(message.text) if strip_custom else message.text
         common = {"disable_notification": bool(message.disable_notification), "protect_content": bool(message.protect_content)}
-        markup = await self._markup(message.buttons, strip_custom=strip_custom)
+        markup = await self._markup(message.buttons, strip_custom=strip_custom, strip_style=strip_style, notes=notes)
         media = message.media
         if not media:
             sent = await self.bot.send_message(
